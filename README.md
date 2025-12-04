@@ -14,7 +14,7 @@ We utilize a **Medallion Architecture** pattern for data storage to ensure repro
 | **🥉 Base** | `nlcli-ml-training-base-03ca945a` | Raw input data (e.g., scraped CLI help docs, raw command logs). |
 | **🥈 Staging** | `nlcli-ml-training-staging-03ca945a` | Cleaned and deduplicated data (per dataset deduplication); intermediate processing. |
 | **🥇 Mart** | `nlcli-ml-training-mart-03ca945a` | Final datasets training with deduplication (cross dataset deduplication). |
-| **🪣 Models** | `nlcli-models` | Storage for final `.gguf` quantized models. We want to stay in a free tier so use Hugging Face.  |
+| **🪣 Models** | `nlcli-models` | Storage for final `.gguf` quantized models. We want to stay within the free tier (5GB) so use Hugging Face preferably.  |
 
 
 ---
