@@ -82,19 +82,5 @@ We intend to operate strictly within the **GCP Free Tier limits**:
 * **Compute:** None (Training occurs on Google Colab Free Tier T4 GPUs).
 ---
 
-## 📋 Project Status & Roadmap
-
-### Current Infrastructure
-- [x] **Base/Staging/Mart Buckets:** Provisioned via Terraform.
-- [x] **IAM Roles:** Engineering group created and assigned.
-- [x] **Billing:** Account linked (Owned by Ciaran).
-
-### To Do
-- [ ] **Remote State:** Configure a GCS backend for Terraform state to allow team collaboration (To ensure "locking" in case 2 engineers make changes at the same time. Also to ensure we have a single source of truth for infra by having the tfstate on the cloud).
-- [ ] **Billing Safeguard:** Implement the "Kill Switch" Cloud Function to automatically disable billing if the €10 threshold is reached.
-- [ ] **Lifecycle Rules:** Add Terraform rules to auto-archive objects in the `base` bucket after 30 days to ensure we stay under the 5GB cap. Once base layer data has been process into staging, it won't be touched again most likely.
-
----
-
 ## Billing account
 Ciaran currently owns the billing account under his personal email ciaranobrienmusic@gmail.com 
