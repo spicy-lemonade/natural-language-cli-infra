@@ -78,7 +78,7 @@ Access is managed via Google Groups to streamline permissions for the ML Enginee
 **Goal:** Zero-cost infrastructure.
 
 We intend to operate strictly within the **GCP Free Tier limits**:
-* **Storage:** < 5GB-months of standard storage (US regions).
+* **Storage:** < 5GB-months of standard storage.
 * **Compute:** None (Training occurs on Google Colab Free Tier T4 GPUs).
 ---
 
