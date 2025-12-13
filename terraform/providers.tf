@@ -11,11 +11,6 @@ terraform {
       version = "~> 3.5"
     }
   }
-
-  backend "gcs" {
-    bucket = "nlcli-terraform-state-nl-cli"
-    prefix = "nlcli-wizard/state"
-  }
 }
 
 provider "google" {
