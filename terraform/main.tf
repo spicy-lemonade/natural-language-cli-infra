@@ -158,18 +158,7 @@ resource "google_storage_bucket" "nlcli_models" {
   uniform_bucket_level_access = true
 
   versioning {
-    enabled = var.enable_versioning
-  }
-
-  # Keep only 3 most recent versions
-  lifecycle_rule {
-    condition {
-      num_newer_versions = 3
-      with_state         = "ARCHIVED"
-    }
-    action {
-      type = "Delete"
-    }
+    enabled = false
   }
 
   labels = {
