@@ -41,28 +41,38 @@ resource "google_storage_bucket" "nlcli_ml_training_base" {
     enabled = var.enable_versioning
   }
 
-  dynamic "lifecycle_rule" {
-    for_each = var.data_retention_days > 0 ? [1] : []
-    content {
-      condition {
-        age = var.data_retention_days
-      }
-      action {
-        type = "Delete"
-      }
+  # Move current objects to COLDLINE after 14 days
+  lifecycle_rule {
+    condition {
+      age                   = 14
+      matches_storage_class = ["STANDARD"]
+    }
+    action {
+      type          = "SetStorageClass"
+      storage_class = "COLDLINE"
     }
   }
 
-  dynamic "lifecycle_rule" {
-    for_each = var.enable_versioning ? [1] : []
-    content {
-      condition {
-        num_newer_versions = 3
-        with_state         = "ARCHIVED"
-      }
-      action {
-        type = "Delete"
-      }
+  # Move non-current versions to COLDLINE after 14 days
+  lifecycle_rule {
+    condition {
+      days_since_noncurrent_time = 14
+      matches_storage_class      = ["STANDARD"]
+    }
+    action {
+      type          = "SetStorageClass"
+      storage_class = "COLDLINE"
+    }
+  }
+
+  # Keep only 3 most recent versions
+  lifecycle_rule {
+    condition {
+      num_newer_versions = 3
+      with_state         = "ARCHIVED"
+    }
+    action {
+      type = "Delete"
     }
   }
 
@@ -87,28 +97,14 @@ resource "google_storage_bucket" "nlcli_ml_training_staging" {
     enabled = var.enable_versioning
   }
 
-  dynamic "lifecycle_rule" {
-    for_each = var.data_retention_days > 0 ? [1] : []
-    content {
-      condition {
-        age = var.data_retention_days
-      }
-      action {
-        type = "Delete"
-      }
+  # Keep only 3 most recent versions
+  lifecycle_rule {
+    condition {
+      num_newer_versions = 3
+      with_state         = "ARCHIVED"
     }
-  }
-
-  dynamic "lifecycle_rule" {
-    for_each = var.enable_versioning ? [1] : []
-    content {
-      condition {
-        num_newer_versions = 3
-        with_state         = "ARCHIVED"
-      }
-      action {
-        type = "Delete"
-      }
+    action {
+      type = "Delete"
     }
   }
 
@@ -133,28 +129,14 @@ resource "google_storage_bucket" "nlcli_ml_training_mart" {
     enabled = var.enable_versioning
   }
 
-  dynamic "lifecycle_rule" {
-    for_each = var.data_retention_days > 0 ? [1] : []
-    content {
-      condition {
-        age = var.data_retention_days
-      }
-      action {
-        type = "Delete"
-      }
+  # Keep only 3 most recent versions
+  lifecycle_rule {
+    condition {
+      num_newer_versions = 3
+      with_state         = "ARCHIVED"
     }
-  }
-
-  dynamic "lifecycle_rule" {
-    for_each = var.enable_versioning ? [1] : []
-    content {
-      condition {
-        num_newer_versions = 3
-        with_state         = "ARCHIVED"
-      }
-      action {
-        type = "Delete"
-      }
+    action {
+      type = "Delete"
     }
   }
 
@@ -176,7 +158,18 @@ resource "google_storage_bucket" "nlcli_models" {
   uniform_bucket_level_access = true
 
   versioning {
-    enabled = false
+    enabled = var.enable_versioning
+  }
+
+  # Keep only 3 most recent versions
+  lifecycle_rule {
+    condition {
+      num_newer_versions = 3
+      with_state         = "ARCHIVED"
+    }
+    action {
+      type = "Delete"
+    }
   }
 
   labels = {
