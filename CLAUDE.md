@@ -2,86 +2,142 @@
 
 This file provides guidance to Claude Code when working with code in this repository.
 
-## Project Overview
-
-This project uses Python to train locally-running small language models (SLMs) to translate natural language into CLI commands. It uses fine-tuned models like Gemma3-1B or Qwen3-4b with QLoRA and GGUF quantization for CPU-optimized inference. The goal is 90%+ command accuracy with ~2.5GB footprint and <2s inference on CPU. This specific repo is the infrastructure for this project including terraform for provisioning resources, and all back end code.
-
 ## Important Rules
 
 - *Never* run git commands without asking for user permission, even if 'auto-accept' is selected during a Claude Command session
-- *Never* run files which use an LLM API without asking for user permission,  even if 'auto-accept' is selected during a Claude Command session
-- *Never* attempt to re-engineer the code or alter data without asking for user permission
+- *Never* run `terraform apply` or `terraform destroy` without explicit user permission
+- *Never* modify infrastructure state or cloud resources without asking for user permission
 - *Never* make assumptions. Ask for more information and wait for the user response.
 - Do *not* use numerical prefixes when writing comments
-- Do *not* use newline characters in print statements
 - Use double quotation marks instead of single quotation marks when possible
-- Use type hinting
-- Favor modular, resuable code
-- Favor vectorised code
-- When adding new datasets, follow the base → staging → mart pipeline
-- Always run deduplication at both staging (per-file) and mart (cross-file) layers
-- Using concurrency when processing data with an LLM API 
+- Favor modular, reusable code
 
+## Project Overview
+
+This repository contains the infrastructure code for a machine learning project that trains locally-running small language models (SLMs) to translate natural language into CLI commands. The infrastructure provisions and manages cloud resources using Terraform and implements backend services in Go.
 
 **Key Technologies:**
-- Unsloth 2025.1+ with QLoRA for efficient fine-tuning
-- GGUF quantization with llama.cpp for CPU inference
-- Alpaca format for training data
-- Google Cloud Storage for data versioning
-- Gemini for processing data with an LLM
+- Terraform for infrastructure as code
+- Go for backend services
+- Google Cloud Platform (GCP) as the cloud provider
 
-## Essential Information
+## Go Code Style
 
-### Data Pipeline
-The data pipeline follows a three-layer, medallion-style architecture: base → staging → mart, with versioned GCS buckets:
+These rules ensure Go code is simple, readable, maintainable, and follows Go's philosophy of simplicity.
 
-**Base Layer** (raw unprocessed data):
+### The Principle of Least Abstraction
 
-Downloads and save raw data to GCS base bucket, for example:
+Your goal is clarity over cleverness. Start with the simplest possible solution.
 
+- **Default to a Single Function** - Solve the problem within a single function first. Do not create helper functions, new types, or new packages prematurely.
+- **Justify Every Abstraction** - Before creating a new function, struct, or package, justify its existence based on concrete needs (e.g., function length, parameter count, or the Rule of Three).
+
+### Function Design
+
+Functions are the fundamental building blocks. They must be clear and focused.
+
+- **Functions Do One Thing** - Every function should have a single, clear responsibility. If you cannot describe what a function does in one simple sentence, it's doing too much.
+- **Function Length Limit** - A function should rarely exceed 50 lines. If a function grows longer, decompose it into smaller, private helper functions. Keep these helpers in the same file to maintain locality.
+- **Parameter Limit** - A function must not have more than four parameters.
+  - If you need more, group related parameters into a struct.
+  - If a function needs to operate on shared state, make it a method on a struct that holds that state.
+- **Return Values** - Return one or two values directly. If you need to return three or more related values, use a named struct to give them context and clarity.
+
+### Duplication vs. Abstraction
+
+Avoid hasty abstractions. Duplication is often better than the wrong abstraction.
+
+- **The Rule of Three** - Do not refactor duplicated code on its first or second appearance. Only when you encounter the third instance should you consider creating a shared abstraction.
+- **Verify True Duplication** - Before refactoring, confirm the duplicated code represents the same core logic. If the code blocks look similar by coincidence but handle different business rules that might change independently, they must remain separate.
+
+### Package and Interface Philosophy
+
+Follow Go's idiomatic approach to packages and interfaces.
+
+- **Packages Have a Singular Purpose** - A package should represent a single concept (e.g., `storage`, `auth`, `models`). Do not create generic "utility," "common," or "helpers" packages.
+- **Interfaces are Defined by the Consumer** - Do not define large, monolithic interfaces on the producer side. Instead, the function that uses a dependency should define a small interface describing only the behavior it requires.
+- **Keep Interfaces Small** - An interface should ideally have one method. Interfaces with more than three methods are a red flag and should be re-evaluated.
+
+### Error Handling
+
+Go's explicit error handling is a feature, not a bug.
+
+- **Always Check Errors** - Never ignore returned errors. Handle them explicitly or propagate them with context.
+- **Add Context to Errors** - When propagating errors, wrap them with `fmt.Errorf("context: %w", err)` to provide context about where and why the error occurred.
+- **Return Errors, Don't Panic** - Reserve `panic` for truly unrecoverable situations. Prefer returning errors for expected failure modes.
+
+### Naming Conventions
+
+- **Short, Clear Names** - Variables should have short names in small scopes (e.g., `i` for loop indices, `err` for errors) and longer, more descriptive names in broader scopes.
+- **Avoid Stuttering** - Don't repeat the package name in type names (e.g., use `storage.Bucket`, not `storage.StorageBucket`).
+- **Exported vs. Unexported** - Use capitalization to control visibility. Export only what needs to be public.
+
+## Terraform Standards
+
+Infrastructure code should be predictable, maintainable, and follow Terraform best practices.
+
+### Module Organization
+
+- **Single Responsibility** - Each Terraform module should provision resources for a single logical component (e.g., `storage`, `networking`, `compute`).
+- **Keep Modules Focused** - A module should not exceed ~300 lines. If it grows larger, split it into sub-modules.
+- **Use Variables for Flexibility** - Parameterize values that might change across environments (e.g., region, instance size, bucket names).
+
+### Resource Naming
+
+- **Consistent Naming Convention** - Use a consistent pattern like `{project}-{environment}-{resource}-{identifier}` (e.g., `nlcli-prod-gcs-training-data`).
+- **Use Variables for Names** - Define naming conventions in variables to ensure consistency across resources.
+
+### State Management
+
+- **Remote State** - Always use remote state (e.g., GCS backend) for collaboration and state locking.
+- **Never Commit State Files** - Ensure `.tfstate` files are in `.gitignore`.
+- **Separate State per Environment** - Use separate state files for different environments (dev, staging, prod).
+
+### Code Quality
+
+- **Format Code** - Always run `terraform fmt` before committing.
+- **Validate Configuration** - Run `terraform validate` to catch syntax errors.
+- **Plan Before Apply** - Always review `terraform plan` output before applying changes.
+
+## Testing
+
+### Go Testing
 ```bash
-python -m data.base.docker.dockerNLcommands
+# Run all tests
+go test ./...
+
+# Run tests with coverage
+go test -cover ./...
+
+# Run specific test
+go test -run TestFunctionName ./path/to/package
 ```
 
-**Staging Layer** (Alpaca format with MD5 hashing):
-
-Transforms base data to Alpaca format with "instruction", "input" and "output" columns. Additionally, a column
-called "md5_hash" is added based on a combination of the "instruction" and "output" columns after they have been stripped of leading and trailing white space. The data is deduplicated using the md5 hash, and saved to GCS staging bucket, for example:
-
+### Terraform Testing
 ```bash
-python -m data.staging.docker.dockerNLcommands
+# Validate syntax
+terraform validate
+
+# Check formatting
+terraform fmt -check
+
+# Plan to preview changes
+terraform plan
 ```
 
-**Mart Layer** (model-specific training format):
-
-Loads all staging data, joins it, performs cross-file deduplication, apply chat templates, save to GCS mart bucket, for example:
-
-```bash
-python -m data.mart.gemma_nl_cli_training
+## Project Structure
 ```
-### Data Architecture
+.
+├── src/               # Go backend code
+│   ├── cmd/           # Application entry points
+│   ├── internal/      # Private packages
+│   └── pkg/           # Public packages (if any)
+├── terraform/         # Infrastructure as code
+├── CLAUDE.md          # AI assistant guidance
+└── README.md          # Project documentation
+```
 
-1. **Base Layer** (`data/base/`)
-   - Raw unprocessed data from HuggingFace datasets
-   - Organized by CLI tool: `bash/`, `docker/`, `git/`, `kubernetes/`, `aws/` etc.
-   - Saved to GCS bucket: `nlcli-ml-training-base-03ca945a`
+## Project Notes
 
-2. **Staging Layer** (`data/staging/`)
-   - Transforms base data into Alpaca format: `instruction`, `input`, `output`. Also synthetically generated or modified datasets are placed in staging.
-   - Adds MD5 hash column (`md5_hash`) for deduplication using `data/etl/utils/hashing.py`
-   - Per-file deduplication based on `instruction + output` hash
-   - Saved as Parquet files to GCS bucket: `nlcli-ml-training-staging-03ca945a`
-   - Uses `data/etl/save/gcs_folder.py` for GCS operations
-
-3. **Mart Layer** (`data/mart/`)
-   - Loads all staging Parquet files
-   - Cross-file deduplication (removes duplicates across all datasets)
-   - Applies model-specific chat templates (e.g., Gemma's `<start_of_turn>` tokens)
-   - Outputs training-ready JSONL to GCS bucket: `nlcli-ml-training-mart-03ca945a`
-
-## Model Fine-tuning
-
-Training happens on Google Colab with GPUs.
-
-## Project notes
-- The project uses Python 3.8+
+- All GCS buckets have versioning enabled except the models bucket
+- Use environment variables for sensitive configuration (never commit secrets)
