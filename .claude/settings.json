@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m data.staging.bash.rohanbalkondekar_linux_commands:*)",
+      "Bash(python -m data.staging.bash.linux_cmd_alpaca:*)",
+      "Bash(python -m data.staging.kubernetes.kubernetes_cli_dataset_20k:*)",
+      "Bash(python -m data.staging.kubernetes.kubernetes_operator_8b_2k:*)",
+      "Bash(python -m data.staging.git.git_instruction_dataset:*)",
+      "Bash(python -m data.staging.git.git_prompt:*)",
+      "Bash(python -m data.staging.command_line.command-line-suggestions:*)",
+      "Bash(python -m data.staging.docker.hf_docker_nl_commands:*)",
+      "Bash(python -m data.staging.docker.docker_commands_manual:*)",
+      "Bash(python -m data.staging.venvy.venvy_commands_manual:*)"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/pre-bash-exec.py"
+          }
+        ]
+      }
+    ]
+  }
+}
