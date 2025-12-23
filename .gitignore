@@ -22,6 +22,3 @@ override.tf.json
 # CLI config
 .terraformrc
 terraform.rc
-
-# Claude
-.claude/
