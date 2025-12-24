@@ -1,3 +1,4 @@
 firebase-functions>=0.4.0
 firebase-admin>=6.5.0
 stripe>=7.0.0
+resend>=0.8.0
