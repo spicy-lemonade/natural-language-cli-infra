@@ -32,3 +32,6 @@ ENV/
 # Firebase
 firebase-debug.log
 firebase-debug.*.log
+
+# Python
+__pycache__/
