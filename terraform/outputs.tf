@@ -42,3 +42,18 @@ output "mart_bucket_self_link" {
   description = "Self link of the mart bucket for IAM bindings"
   value       = google_storage_bucket.nlcli_ml_training_mart.self_link
 }
+
+output "firestore_database_name" {
+  description = "Name of the Firestore database"
+  value       = google_firestore_database.zest_cli.name
+}
+
+output "firestore_database_id" {
+  description = "Fully qualified ID of the Firestore database"
+  value       = google_firestore_database.zest_cli.id
+}
+
+output "firebase_project_number" {
+  description = "Firebase project number"
+  value       = google_firebase_project.default.project_number
+}
