@@ -142,21 +142,59 @@ def load_model():
                 verbose=False
             )
 
-def generate_command(llm, query):
-    current_os = platform.system()
-    os_name = "macOS" if current_os == "Darwin" else current_os
-    
+def generate_command(llm, nl_query):
+    # System Prompt (Rules + Defaults)
     system_part = (
         "<start_of_turn>system\n"
-        f"You are a command line tool running on {os_name}. Output the exact command only.\n"
-        "Identity: You are a small language model developed by Spicy Lemonade.\n"
-        "Rules: Output the exact command ONLY. No markdown.\n"
+        "You are a command line tool. Output the exact command only.\n"
+        "Rules:\n"
+        "1. If the user says 'deployment' or 'pod', use 'kubectl'.\n"
+        "2. If the user says 'container', use 'docker'.\n"
+        "3. For exclusion logic, ALWAYS use 'find' or 'rsync'. DO NOT invent flags.\n"
+        "4. Use idiomatic aliases (e.g. 'kubectl config use-context') instead of editing config files.\n"
+        "5. For remote SSL checks, use 'openssl s_client'.\n"
         "<end_of_turn>\n"
     )
-    
-    full_prompt = f"{system_part}<start_of_turn>user\n{query}<end_of_turn>\n<start_of_turn>model\n"
-    output = llm(full_prompt, max_tokens=128, stop=["<end_of_turn>", "\n"], echo=False, temperature=0.1)
-    return output['choices'][0]['text'].strip()
+
+    # Few-Shot Examples (Reinforcing the Rules)
+    examples_part = (
+        # Standard Admin
+        "<start_of_turn>user\nCheck the status of nginx\n<end_of_turn>\n"
+        "<start_of_turn>model\nsystemctl status nginx\n<end_of_turn>\n"
+
+        # Git
+        "<start_of_turn>user\nCommit all changes with message 'wip'\n<end_of_turn>\n"
+        "<start_of_turn>model\ngit commit -am 'wip'\n<end_of_turn>\n"
+
+        # K8s Disambiguation (Protects against Docker confusion)
+        "<start_of_turn>user\nDelete the nginx pod\n<end_of_turn>\n"
+        "<start_of_turn>model\nkubectl delete pod nginx\n<end_of_turn>\n"
+
+        # K8s Context
+        "<start_of_turn>user\nSwitch to the dev cluster\n<end_of_turn>\n"
+        "<start_of_turn>model\nkubectl config use-context dev\n<end_of_turn>\n"
+
+        # K8s Labels
+        "<start_of_turn>user\nList all pods and show their labels\n<end_of_turn>\n"
+        "<start_of_turn>model\nkubectl get pods --show-labels\n<end_of_turn>\n"
+
+        # SSL
+        "<start_of_turn>user\nCheck the certificate expiration for google.com\n<end_of_turn>\n"
+        "<start_of_turn>model\necho | openssl s_client -connect google.com:443 | openssl x509 -noout -dates\n<end_of_turn>\n"
+
+        # Exclusion 1
+        "<start_of_turn>user\nRecursively remove files in /data but keep .txt files\n<end_of_turn>\n"
+        "<start_of_turn>model\nfind /data -type f ! -name '*.txt' -delete\n<end_of_turn>\n"
+
+        # Exclusion 2
+        "<start_of_turn>user\nCopy all files from /src to /dest except logo.png\n<end_of_turn>\n"
+        "<start_of_turn>model\nrsync -av --exclude='logo.png' /src/ /dest/\n<end_of_turn>\n"
+    )
+
+    # The Real Query
+    prompt = f"{system_part}{examples_part}<start_of_turn>user\n{nl_query}<end_of_turn>\n<start_of_turn>model\n"
+    output = llm(prompt, max_tokens=128, stop=["<end_of_turn>", "\n"], echo=False, temperature=0.1)
+    return output["choices"][0]["text"].strip()
 
 def main():
     # 1. Handle Administrative Flags
