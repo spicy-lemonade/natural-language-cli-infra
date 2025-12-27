@@ -14,16 +14,12 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-This repository contains the infrastructure code for a machine learning project that trains locally-running small language models (SLMs) to translate natural language into CLI commands. The infrastructure provisions and manages cloud resources using Terraform and implements backend services in Go.
+This repository contains the infrastructure code for a machine learning project that trains locally-running small language models (SLMs) to translate natural language into CLI commands. The infrastructure provisions and manages cloud resources using Terraform and implements backend services in Python.
 
 **Key Technologies:**
 - Terraform for infrastructure as code
-- Go for backend services
+- Python for backend services
 - Google Cloud Platform (GCP) as the cloud provider
-
-## Go Code Style
-
-These rules ensure Go code is simple, readable, maintainable, and follows Go's philosophy of simplicity.
 
 ### The Principle of Least Abstraction
 
@@ -59,8 +55,6 @@ Follow Go's idiomatic approach to packages and interfaces.
 - **Keep Interfaces Small** - An interface should ideally have one method. Interfaces with more than three methods are a red flag and should be re-evaluated.
 
 ### Error Handling
-
-Go's explicit error handling is a feature, not a bug.
 
 - **Always Check Errors** - Never ignore returned errors. Handle them explicitly or propagate them with context.
 - **Add Context to Errors** - When propagating errors, wrap them with `fmt.Errorf("context: %w", err)` to provide context about where and why the error occurred.
@@ -99,20 +93,6 @@ Infrastructure code should be predictable, maintainable, and follow Terraform be
 - **Validate Configuration** - Run `terraform validate` to catch syntax errors.
 - **Plan Before Apply** - Always review `terraform plan` output before applying changes.
 
-## Testing
-
-### Go Testing
-```bash
-# Run all tests
-go test ./...
-
-# Run tests with coverage
-go test -cover ./...
-
-# Run specific test
-go test -run TestFunctionName ./path/to/package
-```
-
 ### Terraform Testing
 ```bash
 # Validate syntax
@@ -128,13 +108,14 @@ terraform plan
 ## Project Structure
 ```
 .
-├── src/               # Go backend code
-│   ├── cmd/           # Application entry points
-│   ├── internal/      # Private packages
-│   └── pkg/           # Public packages (if any)
+├── functions/         # Python backend (Firebase Cloud Functions)
 ├── terraform/         # Infrastructure as code
+├── zest_cli/          # CLI application
+├── firebase.json      # Firebase configuration
+├── .firebaserc        # Firebase project settings
 ├── CLAUDE.md          # AI assistant guidance
-└── README.md          # Project documentation
+├── README.md          # Project documentation
+└── IMPLEMENTATION_SUMMARY.md  # Implementation details
 ```
 
 ## Project Notes
