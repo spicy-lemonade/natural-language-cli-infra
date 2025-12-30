@@ -208,7 +208,7 @@ def verify_otp_and_register(req: https_fn.Request) -> https_fn.Response:
     devices.append({
         "uuid": device_uuid,
         "nickname": device_nickname,
-        "registered_at": datetime.utcnow().isoformat()
+        "registered_at": datetime.now(timezone.utc).isoformat()
     })
 
     # Clear OTP and update devices
@@ -304,7 +304,7 @@ def replace_device(req: https_fn.Request) -> https_fn.Response:
     devices.append({
         "uuid": new_device_uuid,
         "nickname": new_device_nickname,
-        "registered_at": datetime.utcnow().isoformat()
+        "registered_at": datetime.now(timezone.utc).isoformat()
     })
 
     doc_ref.update({"devices": devices})
