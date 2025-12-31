@@ -151,19 +151,38 @@ resource "google_storage_bucket" "nlcli_ml_training_mart" {
 
 resource "google_storage_bucket" "nlcli_models" {
   name          = "nlcli-models"
-  location      = var.region
+  location      = "US"  # Multi-region for fast global downloads (US has best global latency)
   storage_class = "STANDARD"
   project       = var.project_id_prod
+  force_destroy = true  # Allow deletion even with objects (for migration)
 
   uniform_bucket_level_access = true
 
   versioning {
-    enabled = false
+    enabled = true  # Keep old model versions for rollback
+  }
+
+  # Keep only 1 previous version for rollback (current + 1 old)
+  lifecycle_rule {
+    condition {
+      num_newer_versions = 1
+      with_state         = "ARCHIVED"
+    }
+    action {
+      type = "Delete"
+    }
   }
 
   labels = {
     environment = var.environment
     project     = "nlcli-wizard"
-    purpose     = "ml-models"
+    purpose     = "ml-models-distribution"
   }
+}
+
+# Make the models bucket publicly readable for user downloads
+resource "google_storage_bucket_iam_member" "nlcli_models_public_read" {
+  bucket = google_storage_bucket.nlcli_models.name
+  role   = "roles/storage.objectViewer"
+  member = "allUsers"
 }

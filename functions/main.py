@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import json
 import random
+import uuid
 import resend
 from datetime import datetime, timezone, timedelta
 from firebase_functions import https_fn, options
@@ -12,8 +13,14 @@ from firebase_admin import initialize_app, firestore
 initialize_app()
 
 # Configuration constants
-MAX_DEVICES = 2
+MAX_DEVICES_PER_PRODUCT = 2
 OTP_EXPIRY_MINUTES = 10
+VALID_PRODUCTS = ["fp16", "q5"]
+
+
+def get_product_fields(product: str) -> tuple:
+    """Return field names for a given product type."""
+    return (f"{product}_is_paid", f"{product}_devices", f"{product}_polar_order_id")
 
 @https_fn.on_request(
     region="europe-west1",
@@ -56,22 +63,57 @@ def polar_webhook(req: https_fn.Request) -> https_fn.Response:
         return https_fn.Response("Invalid JSON payload", status=400)
 
     # Logic for successful order
-    # Polar sends "order.created" when a one-time purchase is completed
-    if event.get("type") == "order.created":
+    # Polar sends "order.paid" when payment is confirmed
+    if event.get("type") == "order.paid":
         order = event.get("data", {})
-        customer_email = order.get("customer_email")
+        customer = order.get("customer", {})
+        customer_email = customer.get("email")
 
         if not customer_email:
             return https_fn.Response("No customer email in order", status=400)
 
+        # Determine product type from product name
+        # Expected product names: "Zest CLI FP16" or "Zest CLI Q5" (or similar)
+        product = order.get("product", {})
+        product_name = product.get("name", "").lower()
+
+        if "fp16" in product_name or "fp" in product_name:
+            product_type = "fp16"
+        elif "q5" in product_name or "quantized" in product_name:
+            product_type = "q5"
+        else:
+            # Default to q5 if unclear
+            product_type = "q5"
+
+        paid_field, devices_field, order_field = get_product_fields(product_type)
+
         db = firestore.client()
         license_ref = db.collection("licenses").document(customer_email)
 
-        # We set is_paid to True. We don't set hardware_id yet;
-        # that happens when the user first runs the CLI.
-        license_ref.set({"is_paid": True}, merge=True)
+        # Check if license already exists to preserve user_id
+        existing_doc = license_ref.get()
+        if existing_doc.exists:
+            existing_data = existing_doc.to_dict()
+            zest_user_id = existing_data.get("zest_user_id", str(uuid.uuid4()))
+        else:
+            zest_user_id = str(uuid.uuid4())
 
-        return https_fn.Response(f"License updated for {customer_email}", status=200)
+        now = datetime.now(timezone.utc)
+        license_ref.set({
+            "zest_user_id": zest_user_id,
+            "email": customer_email,
+            "polar_customer_id": order.get("customer_id"),
+            "polar_user_id": order.get("user_id"),
+            "updated_at": now.isoformat(),
+            "updated_at_unix": int(now.timestamp()),
+            paid_field: True,
+            order_field: order.get("id")
+        }, merge=True)
+
+        return https_fn.Response(
+            f"License for {product_type} updated for {customer_email}",
+            status=200
+        )
 
     return https_fn.Response(f"Unhandled event: {event.get('type')}", status=200)
 
@@ -87,7 +129,7 @@ def polar_webhook(req: https_fn.Request) -> https_fn.Response:
 def send_otp(req: https_fn.Request) -> https_fn.Response:
     """
     Generate a 6-digit OTP and send it to the user's email via Resend.
-    Expects JSON: {"email": "user@example.com"}
+    Expects JSON: {"email": "user@example.com", "product": "fp16" or "q5"}
     """
     try:
         data = req.get_json()
@@ -95,8 +137,15 @@ def send_otp(req: https_fn.Request) -> https_fn.Response:
         return https_fn.Response("Invalid JSON", status=400)
 
     email = data.get("email")
+    product = data.get("product", "q5")
+
     if not email:
         return https_fn.Response("Missing email", status=400)
+
+    if product not in VALID_PRODUCTS:
+        return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
+
+    paid_field, _, _ = get_product_fields(product)
 
     db = firestore.client()
     doc_ref = db.collection("licenses").document(email)
@@ -106,8 +155,8 @@ def send_otp(req: https_fn.Request) -> https_fn.Response:
         return https_fn.Response("No license found for this email", status=404)
 
     license_data = doc.to_dict()
-    if not license_data.get("is_paid"):
-        return https_fn.Response("License not paid", status=403)
+    if not license_data.get(paid_field):
+        return https_fn.Response(f"No {product} license found for this email", status=403)
 
     # Generate 6-digit OTP
     otp_code = str(random.randint(100000, 999999))
@@ -153,8 +202,9 @@ def send_otp(req: https_fn.Request) -> https_fn.Response:
 )
 def verify_otp_and_register(req: https_fn.Request) -> https_fn.Response:
     """
-    Verify OTP and register the device.
-    Expects JSON: {"email": "user@example.com", "otp": "123456", "device_uuid": "uuid", "device_nickname": "My Mac"}
+    Verify OTP and register the device for a specific product.
+    Expects JSON: {"email": "...", "otp": "123456", "device_uuid": "uuid",
+                   "device_nickname": "My Mac", "product": "fp16" or "q5"}
     """
     try:
         data = req.get_json()
@@ -165,9 +215,15 @@ def verify_otp_and_register(req: https_fn.Request) -> https_fn.Response:
     otp = data.get("otp")
     device_uuid = data.get("device_uuid")
     device_nickname = data.get("device_nickname")
+    product = data.get("product", "q5")
 
     if not all([email, otp, device_uuid, device_nickname]):
         return https_fn.Response("Missing required fields", status=400)
+
+    if product not in VALID_PRODUCTS:
+        return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
+
+    paid_field, devices_field, _ = get_product_fields(product)
 
     db = firestore.client()
     doc_ref = db.collection("licenses").document(email)
@@ -186,39 +242,48 @@ def verify_otp_and_register(req: https_fn.Request) -> https_fn.Response:
         return https_fn.Response("No OTP found. Please request a new one.", status=400)
 
     if datetime.now(timezone.utc) > otp_expiry:
-        return https_fn.Response(
-            "OTP expired. Please request a new one.",
-            status=400
-        )
+        return https_fn.Response("OTP expired. Please request a new one.", status=400)
+
     if stored_otp != otp:
         return https_fn.Response("Invalid OTP", status=403)
 
-    # Check device limit
-    devices = license_data.get("devices", [])
+    # Check if user has license for this product
+    if not license_data.get(paid_field):
+        return https_fn.Response(f"No {product} license found", status=403)
 
-    # Check if device already registered
+    # Check device limit for this product
+    devices = license_data.get(devices_field, [])
+
+    # Check if device already registered for this product
     for device in devices:
         if device["uuid"] == device_uuid:
-            return https_fn.Response("Device already registered", status=200)
+            return https_fn.Response(f"Device already registered for {product}", status=200)
 
-    if len(devices) >= MAX_DEVICES:
-        return https_fn.Response("Device limit reached", status=403)
+    if len(devices) >= MAX_DEVICES_PER_PRODUCT:
+        return https_fn.Response(
+            f"Device limit reached for {product}. Use 'zest --uninstall --{product}' on another device.",
+            status=403
+        )
 
     # Register device
+    now = datetime.now(timezone.utc)
     devices.append({
         "uuid": device_uuid,
         "nickname": device_nickname,
-        "registered_at": datetime.now(timezone.utc).isoformat()
+        "registered_at": now.isoformat(),
+        "registered_at_unix": int(now.timestamp()),
+        "last_validated": now.isoformat(),
+        "last_validated_unix": int(now.timestamp())
     })
 
     # Clear OTP and update devices
     doc_ref.update({
-        "devices": devices,
+        devices_field: devices,
         "otp_code": firestore.DELETE_FIELD,
         "otp_expiry": firestore.DELETE_FIELD
     })
 
-    return https_fn.Response("Device registered successfully", status=200)
+    return https_fn.Response(f"Device registered for {product}", status=200)
 
 
 @https_fn.on_request(
@@ -230,8 +295,8 @@ def verify_otp_and_register(req: https_fn.Request) -> https_fn.Response:
 )
 def validate_device(req: https_fn.Request) -> https_fn.Response:
     """
-    Validate that a device is registered and licensed.
-    Expects JSON: {"email": "user@example.com", "device_uuid": "uuid"}
+    Validate that a device is registered and licensed for a specific product.
+    Expects JSON: {"email": "...", "device_uuid": "uuid", "product": "fp16" or "q5"}
     """
     try:
         data = req.get_json()
@@ -240,9 +305,15 @@ def validate_device(req: https_fn.Request) -> https_fn.Response:
 
     email = data.get("email")
     device_uuid = data.get("device_uuid")
+    product = data.get("product", "q5")
 
     if not email or not device_uuid:
         return https_fn.Response("Missing email or device_uuid", status=400)
+
+    if product not in VALID_PRODUCTS:
+        return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
+
+    paid_field, devices_field, _ = get_product_fields(product)
 
     db = firestore.client()
     doc_ref = db.collection("licenses").document(email)
@@ -253,15 +324,15 @@ def validate_device(req: https_fn.Request) -> https_fn.Response:
 
     license_data = doc.to_dict()
 
-    if not license_data.get("is_paid"):
-        return https_fn.Response("License not paid", status=403)
+    if not license_data.get(paid_field):
+        return https_fn.Response(f"No {product} license found", status=403)
 
-    devices = license_data.get("devices", [])
+    devices = license_data.get(devices_field, [])
     for device in devices:
         if device["uuid"] == device_uuid:
             return https_fn.Response("Valid", status=200)
 
-    return https_fn.Response("Device not registered", status=403)
+    return https_fn.Response(f"Device not registered for {product}", status=403)
 
 
 @https_fn.on_request(
@@ -273,8 +344,9 @@ def validate_device(req: https_fn.Request) -> https_fn.Response:
 )
 def replace_device(req: https_fn.Request) -> https_fn.Response:
     """
-    Replace an old device with a new one.
-    Expects JSON: {"email": "user@example.com", "old_device_uuid": "uuid", "new_device_uuid": "uuid", "new_device_nickname": "New Mac"}
+    Replace an old device with a new one for a specific product.
+    Expects JSON: {"email": "...", "old_device_uuid": "uuid", "new_device_uuid": "uuid",
+                   "new_device_nickname": "New Mac", "product": "fp16" or "q5"}
     """
     try:
         data = req.get_json()
@@ -285,9 +357,15 @@ def replace_device(req: https_fn.Request) -> https_fn.Response:
     old_device_uuid = data.get("old_device_uuid")
     new_device_uuid = data.get("new_device_uuid")
     new_device_nickname = data.get("new_device_nickname")
+    product = data.get("product", "q5")
 
     if not all([email, old_device_uuid, new_device_uuid, new_device_nickname]):
         return https_fn.Response("Missing required fields", status=400)
+
+    if product not in VALID_PRODUCTS:
+        return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
+
+    _, devices_field, _ = get_product_fields(product)
 
     db = firestore.client()
     doc_ref = db.collection("licenses").document(email)
@@ -297,18 +375,22 @@ def replace_device(req: https_fn.Request) -> https_fn.Response:
         return https_fn.Response("No license found", status=404)
 
     license_data = doc.to_dict()
-    devices = license_data.get("devices", [])
+    devices = license_data.get(devices_field, [])
 
     # Remove old device and add new device
     devices = [d for d in devices if d["uuid"] != old_device_uuid]
+    now = datetime.now(timezone.utc)
     devices.append({
         "uuid": new_device_uuid,
         "nickname": new_device_nickname,
-        "registered_at": datetime.now(timezone.utc).isoformat()
+        "registered_at": now.isoformat(),
+        "registered_at_unix": int(now.timestamp()),
+        "last_validated": now.isoformat(),
+        "last_validated_unix": int(now.timestamp())
     })
 
-    doc_ref.update({"devices": devices})
-    return https_fn.Response("Device replaced successfully", status=200)
+    doc_ref.update({devices_field: devices})
+    return https_fn.Response(f"Device replaced for {product}", status=200)
 
 
 @https_fn.on_request(
@@ -320,8 +402,8 @@ def replace_device(req: https_fn.Request) -> https_fn.Response:
 )
 def deregister_device(req: https_fn.Request) -> https_fn.Response:
     """
-    Remove a device from the license.
-    Expects JSON: {"email": "user@example.com", "device_uuid": "uuid"}
+    Remove a device from the license for a specific product.
+    Expects JSON: {"email": "...", "device_uuid": "uuid", "product": "fp16" or "q5"}
     """
     try:
         data = req.get_json()
@@ -330,9 +412,15 @@ def deregister_device(req: https_fn.Request) -> https_fn.Response:
 
     email = data.get("email")
     device_uuid = data.get("device_uuid")
+    product = data.get("product", "q5")
 
     if not email or not device_uuid:
         return https_fn.Response("Missing email or device_uuid", status=400)
+
+    if product not in VALID_PRODUCTS:
+        return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
+
+    _, devices_field, _ = get_product_fields(product)
 
     db = firestore.client()
     doc_ref = db.collection("licenses").document(email)
@@ -342,13 +430,13 @@ def deregister_device(req: https_fn.Request) -> https_fn.Response:
         return https_fn.Response("No license found", status=404)
 
     license_data = doc.to_dict()
-    devices = license_data.get("devices", [])
+    devices = license_data.get(devices_field, [])
 
     # Remove the device
     devices = [d for d in devices if d["uuid"] != device_uuid]
 
-    doc_ref.update({"devices": devices})
-    return https_fn.Response("Device deregistered successfully", status=200)
+    doc_ref.update({devices_field: devices})
+    return https_fn.Response(f"Device deregistered from {product}", status=200)
 
 
 @https_fn.on_request(
@@ -358,10 +446,14 @@ def deregister_device(req: https_fn.Request) -> https_fn.Response:
         cors_methods=["POST"],
     ),
 )
-def verify_license(req: https_fn.Request) -> https_fn.Response:
+def license_heartbeat(req: https_fn.Request) -> https_fn.Response:
     """
-    Called by the Zest CLI to verify or link a machine to a license.
-    Expects JSON: {"email": "user@example.com", "hardware_id": "unique_hw_string"}
+    Biweekly license validation ping from the CLI.
+    Updates last_validated timestamp for the device for a specific product.
+    Expects JSON: {"email": "...", "device_uuid": "uuid", "product": "fp16" or "q5"}
+
+    The CLI should call this every 2 weeks. If the ping fails due to network
+    issues, the CLI can continue operating using cached validation.
     """
     try:
         data = req.get_json()
@@ -369,27 +461,166 @@ def verify_license(req: https_fn.Request) -> https_fn.Response:
         return https_fn.Response("Invalid JSON", status=400)
 
     email = data.get("email")
-    hw_id = data.get("hardware_id")
+    device_uuid = data.get("device_uuid")
+    product = data.get("product", "q5")
 
-    if not email or not hw_id:
-        return https_fn.Response("Missing email or hardware_id", status=400)
+    if not email or not device_uuid:
+        return https_fn.Response("Missing email or device_uuid", status=400)
+
+    if product not in VALID_PRODUCTS:
+        return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
+
+    paid_field, devices_field, _ = get_product_fields(product)
 
     db = firestore.client()
     doc_ref = db.collection("licenses").document(email)
     doc = doc_ref.get()
 
     if not doc.exists:
-        return https_fn.Response("No license found for this email", status=404)
+        return https_fn.Response("No license found", status=404)
 
     license_data = doc.to_dict()
 
-    # If the license is paid but no hardware_id is linked yet, link it now.
-    if not license_data.get("hardware_id"):
-        doc_ref.update({"hardware_id": hw_id})
-        return https_fn.Response("License successfully linked to this machine", status=200)
+    if not license_data.get(paid_field):
+        return https_fn.Response(f"No {product} license found", status=403)
 
-    # If a hardware_id is already linked, it must match the current machine.
-    if license_data.get("hardware_id") == hw_id:
-        return https_fn.Response("Verified", status=200)
-    else:
-        return https_fn.Response("License is already tied to a different machine", status=403)
+    devices = license_data.get(devices_field, [])
+    device_found = False
+    now = datetime.now(timezone.utc)
+
+    for i, device in enumerate(devices):
+        if device["uuid"] == device_uuid:
+            device_found = True
+            devices[i]["last_validated"] = now.isoformat()
+            devices[i]["last_validated_unix"] = int(now.timestamp())
+            break
+
+    if not device_found:
+        return https_fn.Response(f"Device not registered for {product}", status=403)
+
+    doc_ref.update({devices_field: devices})
+    return https_fn.Response(json.dumps({
+        "status": "valid",
+        "product": product,
+        "validated_at": now.isoformat(),
+        "validated_at_unix": int(now.timestamp())
+    }), status=200, content_type="application/json")
+
+
+# Model file configuration
+MODEL_FILES = {
+    "fp16": "qwen3_4b_fp16.gguf",
+    "q5": "qwen3_4b_Q5_K_M.gguf"
+}
+GCS_BUCKET = "nlcli-models"
+
+
+@https_fn.on_request(
+    region="europe-west1",
+    cors=options.CorsOptions(
+        cors_origins="*",
+        cors_methods=["GET", "POST"],
+    ),
+)
+def check_version(req: https_fn.Request) -> https_fn.Response:
+    """
+    Check for available updates.
+    Returns the latest versions of CLI and models.
+
+    GET or POST with optional JSON: {
+        "current_version": "1.0.0",
+        "current_model_version": "1.0.0",
+        "product": "fp16" or "q5"
+    }
+
+    Response includes:
+    - latest_cli_version: Latest CLI version available
+    - latest_model_version: Latest model version for the product
+    - cli_update_available: Boolean indicating if CLI update is available
+    - model_update_available: Boolean indicating if model update is available
+    - update_message: Optional message to display to user
+    - update_url: URL to download CLI update
+    - model_download_url: Direct URL to download updated model
+    - model_filename: Filename of the model
+    - model_size_bytes: Size of the model file (for progress display)
+    """
+    current_version = None
+    current_model_version = None
+    product = "q5"
+
+    if req.method == "POST":
+        try:
+            data = req.get_json()
+            current_version = data.get("current_version")
+            current_model_version = data.get("current_model_version")
+            product = data.get("product", "q5")
+        except Exception:
+            pass
+
+    if product not in VALID_PRODUCTS:
+        product = "q5"
+
+    db = firestore.client()
+
+    # Get version info from Firestore
+    # Document structure: versions/current with fields:
+    # cli_version, fp16_model_version, q5_model_version,
+    # fp16_model_size, q5_model_size, update_message, update_url
+    version_ref = db.collection("versions").document("current")
+    version_doc = version_ref.get()
+
+    model_filename = MODEL_FILES.get(product, MODEL_FILES["q5"])
+    model_download_url = f"https://storage.googleapis.com/{GCS_BUCKET}/{model_filename}"
+
+    if not version_doc.exists:
+        # If no version document exists, return defaults
+        return https_fn.Response(json.dumps({
+            "latest_cli_version": "1.0.0",
+            "latest_model_version": "1.0.0",
+            "cli_update_available": False,
+            "model_update_available": False,
+            "update_message": None,
+            "update_url": "https://zestcli.com",
+            "model_download_url": model_download_url,
+            "model_filename": model_filename,
+            "model_size_bytes": 0
+        }), status=200, content_type="application/json")
+
+    version_data = version_doc.to_dict()
+    latest_cli = version_data.get("cli_version", "1.0.0")
+    latest_model = version_data.get(f"{product}_model_version", "1.0.0")
+    model_size = version_data.get(f"{product}_model_size", 0)
+    update_message = version_data.get("update_message")
+    update_url = version_data.get("update_url", "https://zestcli.com")
+
+    # Determine if CLI update is available
+    cli_update_available = False
+    if current_version:
+        try:
+            current_parts = [int(x) for x in current_version.split(".")]
+            latest_parts = [int(x) for x in latest_cli.split(".")]
+            cli_update_available = latest_parts > current_parts
+        except (ValueError, AttributeError):
+            pass
+
+    # Determine if model update is available
+    model_update_available = False
+    if current_model_version:
+        try:
+            current_parts = [int(x) for x in current_model_version.split(".")]
+            latest_parts = [int(x) for x in latest_model.split(".")]
+            model_update_available = latest_parts > current_parts
+        except (ValueError, AttributeError):
+            pass
+
+    return https_fn.Response(json.dumps({
+        "latest_cli_version": latest_cli,
+        "latest_model_version": latest_model,
+        "cli_update_available": cli_update_available,
+        "model_update_available": model_update_available,
+        "update_message": update_message,
+        "update_url": update_url,
+        "model_download_url": model_download_url,
+        "model_filename": model_filename,
+        "model_size_bytes": model_size
+    }), status=200, content_type="application/json")

@@ -31,16 +31,311 @@ import re
 from llama_cpp import Llama
 
 # --- Configuration ---
-MODEL_PATH_FP16 = os.path.expanduser("~/.zest/qwen3_4b_fp16.gguf")
-MODEL_PATH_Q5 = os.path.expanduser("~/.zest/qwen3_4b_Q5_K_M.gguf")
-API_BASE = "https://europe-west1-nl-cli-dev.cloudfunctions.net"
+VERSION = "1.0.0"
+MODEL_VERSION = "1.0.0"  # Current model version bundled with this CLI
+ZEST_DIR = os.path.expanduser("~/.zest")
+MODEL_PATH_FP16 = os.path.join(ZEST_DIR, "qwen3_4b_fp16.gguf")
+MODEL_PATH_Q5 = os.path.join(ZEST_DIR, "qwen3_4b_Q5_K_M.gguf")
+API_BASE = "https://europe-west1-nl-cli.cloudfunctions.net"
 CONFIG_DIR = os.path.expanduser("~/Library/Application Support/Zest")
-TOKEN_FILE = os.path.join(CONFIG_DIR, "license.json")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 LEASE_DURATION = 1209600  # 14 days in seconds
+UPDATE_CHECK_INTERVAL = 1209600  # Check for updates every 2 weeks (same as lease)
+
+# Expected app bundle locations
+APP_PATHS = {
+    "fp16": "/Applications/Zest-FP16.app",
+    "q5": "/Applications/Zest-Q5.app"
+}
+
+# Product configuration
+PRODUCTS = {
+    "fp16": {"path": MODEL_PATH_FP16, "name": "FP16 (Full Precision)"},
+    "q5": {"path": MODEL_PATH_Q5, "name": "Q5 (Quantized)"}
+}
 
 # Response constants
 AFFIRMATIVE = ("y", "yes", "yeah", "yep", "sure", "ok", "okay")
 NEGATIVE = ("n", "no", "nah", "nope")
+
+
+def load_config() -> dict:
+    """Load configuration from disk."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def save_config(config: dict):
+    """Save configuration to disk."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f)
+
+
+def check_for_orphaned_installation() -> bool:
+    """
+    Check if app bundle has been deleted but files remain.
+    Returns True if orphaned installation was detected and user chose to clean up.
+    """
+    config = load_config()
+    hw_id = get_hw_id()
+
+    for product, app_path in APP_PATHS.items():
+        model_path = PRODUCTS[product]["path"]
+        product_key = f"{product}_license"
+        license_data = config.get(product_key)
+
+        # Check if model exists but app bundle is missing
+        if os.path.exists(model_path) and not os.path.exists(app_path):
+            print(f"\n⚠️  Zest {PRODUCTS[product]['name']} app was removed from Applications.")
+            print("   Model files and license still exist on this device.")
+            print("")
+            print("   Options:")
+            print("   1. Clean up (remove model files and deregister device)")
+            print("   2. Keep files (if you plan to reinstall)")
+            print("")
+            choice = input("   Enter choice [1/2]: ").strip()
+
+            if choice == "1":
+                # Deregister from server if we have license data
+                if license_data:
+                    email = license_data.get("email")
+                    if email:
+                        print(f"🌶  Deregistering device...", end="\r")
+                        try:
+                            res = requests.post(
+                                f"{API_BASE}/deregister_device",
+                                json={"email": email, "device_uuid": hw_id, "product": product},
+                                timeout=10
+                            )
+                            if res.status_code == 200:
+                                print("\033[K🍋 Device deregistered.")
+                            else:
+                                print(f"\033[K⚠️  Could not deregister: {res.text}")
+                        except requests.exceptions.RequestException:
+                            print("\033[K⚠️  Could not reach server.")
+
+                    del config[product_key]
+
+                # Delete model file
+                try:
+                    os.remove(model_path)
+                    print(f"🗑️  Removed {PRODUCTS[product]['name']} model file.")
+                except OSError as e:
+                    print(f"⚠️  Could not delete model: {e}")
+
+                save_config(config)
+
+                # Clean up empty directories
+                if os.path.exists(ZEST_DIR) and not os.listdir(ZEST_DIR):
+                    try:
+                        os.rmdir(ZEST_DIR)
+                    except OSError:
+                        pass
+
+                print("🍋 Cleanup complete.")
+                return True
+
+    return False
+
+
+def download_model_with_progress(url: str, dest_path: str, total_size: int = 0) -> bool:
+    """
+    Download a model file with progress bar.
+    Returns True if successful, False otherwise.
+    """
+    temp_path = dest_path + ".download"
+
+    try:
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+
+        # Get total size from response if not provided
+        if total_size == 0:
+            total_size = int(response.headers.get("content-length", 0))
+
+        downloaded = 0
+        chunk_size = 1024 * 1024  # 1MB chunks
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+        with open(temp_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    # Display progress
+                    if total_size > 0:
+                        percent = (downloaded / total_size) * 100
+                        downloaded_mb = downloaded / (1024 * 1024)
+                        total_mb = total_size / (1024 * 1024)
+                        bar_width = 30
+                        filled = int(bar_width * downloaded / total_size)
+                        bar = "█" * filled + "░" * (bar_width - filled)
+                        print(f"\r   [{bar}] {percent:.1f}% ({downloaded_mb:.0f}/{total_mb:.0f} MB)", end="", flush=True)
+                    else:
+                        downloaded_mb = downloaded / (1024 * 1024)
+                        print(f"\r   Downloaded: {downloaded_mb:.0f} MB", end="", flush=True)
+
+        print()  # New line after progress bar
+
+        # Move temp file to final destination
+        if os.path.exists(dest_path):
+            os.remove(dest_path)
+        os.rename(temp_path, dest_path)
+
+        return True
+
+    except requests.exceptions.RequestException as e:
+        print(f"\n❌ Download failed: {e}")
+        # Clean up temp file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return False
+    except KeyboardInterrupt:
+        print("\n❌ Download cancelled.")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return False
+
+
+def get_model_version(product: str) -> str:
+    """Get the installed model version for a product from config."""
+    config = load_config()
+    return config.get(f"{product}_model_version", MODEL_VERSION)
+
+
+def set_model_version(product: str, version: str):
+    """Save the installed model version for a product."""
+    config = load_config()
+    config[f"{product}_model_version"] = version
+    save_config(config)
+
+
+def check_for_updates(product: str) -> None:
+    """
+    Check for available updates. Only checks once per day.
+    Displays notification and offers to download model updates.
+    """
+    config = load_config()
+    last_check = config.get("last_update_check", 0)
+    current_time = time.time()
+
+    # Only check once per day
+    if (current_time - last_check) < UPDATE_CHECK_INTERVAL:
+        return
+
+    current_model_version = get_model_version(product)
+
+    try:
+        res = requests.post(
+            f"{API_BASE}/check_version",
+            json={
+                "current_version": VERSION,
+                "current_model_version": current_model_version,
+                "product": product
+            },
+            timeout=5
+        )
+        if res.status_code == 200:
+            data = res.json()
+            config["last_update_check"] = current_time
+            save_config(config)
+
+            # Check for CLI update
+            if data.get("cli_update_available"):
+                print("")
+                print("┌─────────────────────────────────────────────────┐")
+                print(f"│  🍋 CLI Update available: v{data.get('latest_cli_version', 'new')}")
+                if data.get("update_message"):
+                    msg = data.get("update_message")
+                    print(f"│  {msg[:45]}")
+                print(f"│  Download: {data.get('update_url', 'https://zestcli.com')}")
+                print("└─────────────────────────────────────────────────┘")
+                print("")
+
+            # Check for model update
+            if data.get("model_update_available"):
+                latest_model_version = data.get("latest_model_version", "new")
+                model_size = data.get("model_size_bytes", 0)
+                size_gb = model_size / (1024 * 1024 * 1024) if model_size else 0
+
+                print("")
+                print("┌─────────────────────────────────────────────────┐")
+                print(f"│  🍋 Model Update available: v{latest_model_version}")
+                print(f"│  Product: {PRODUCTS[product]['name']}")
+                if size_gb > 0:
+                    print(f"│  Size: {size_gb:.1f} GB")
+                print("└─────────────────────────────────────────────────┘")
+                print("")
+
+                choice = input("🍋 Download new model now? [y/n]: ").strip().lower()
+                if choice in AFFIRMATIVE:
+                    print("")
+                    print(f"📥 Downloading {PRODUCTS[product]['name']} model...")
+                    model_path = PRODUCTS[product]["path"]
+                    download_url = data.get("model_download_url")
+
+                    if download_url:
+                        # Backup old model
+                        backup_path = model_path + ".backup"
+                        if os.path.exists(model_path):
+                            os.rename(model_path, backup_path)
+
+                        success = download_model_with_progress(
+                            download_url,
+                            model_path,
+                            model_size
+                        )
+
+                        if success:
+                            # Update stored model version
+                            set_model_version(product, latest_model_version)
+                            print(f"✅ Model updated to v{latest_model_version}")
+                            # Remove backup
+                            if os.path.exists(backup_path):
+                                os.remove(backup_path)
+                        else:
+                            # Restore backup on failure
+                            if os.path.exists(backup_path):
+                                os.rename(backup_path, model_path)
+                                print("   Restored previous model.")
+                    else:
+                        print("❌ No download URL available.")
+                else:
+                    print("   Skipping model update. Run 'zest --update' later to update.")
+
+    except (requests.exceptions.RequestException, json.JSONDecodeError):
+        # Silently fail - don't block user if update check fails
+        pass
+
+
+def get_active_product() -> str:
+    """
+    Determine which product to use.
+    Priority: 1) User preference, 2) fp16 if available, 3) q5 if available
+    """
+    config = load_config()
+    preferred = config.get("active_product")
+
+    # If user has a preference and the model exists, use it
+    if preferred and os.path.exists(PRODUCTS[preferred]["path"]):
+        return preferred
+
+    # Otherwise, prefer fp16 over q5 if available
+    if os.path.exists(MODEL_PATH_FP16):
+        return "fp16"
+    if os.path.exists(MODEL_PATH_Q5):
+        return "q5"
+
+    return "q5"  # Default
 
 
 def get_hw_id():
@@ -48,53 +343,81 @@ def get_hw_id():
     cmd = 'ioreg -d2 -c IOPlatformExpertDevice | awk -F"\\"" \'/IOPlatformUUID/{print $(NF-1)}\''
     return subprocess.check_output(cmd, shell=True).decode().strip()
 
-def authenticate():
-    """The Gatekeeper: Checks local 14-day lease or starts OTP flow."""
+def authenticate(product: str):
+    """The Gatekeeper: Checks local 14-day lease or starts OTP flow for a product."""
     hw_id = get_hw_id()
+    config = load_config()
+    product_key = f"{product}_license"
+    model_path = PRODUCTS[product]["path"]
+    product_name = PRODUCTS[product]["name"]
 
-    # 1. Check for local lease
-    if os.path.exists(TOKEN_FILE):
+    # 1. Check for local lease for this product
+    license_data = config.get(product_key, {})
+    if license_data:
+        email = license_data.get("email")
+        last_verified = license_data.get("last_verified", 0)
+        current_time = time.time()
+
+        # If the 14-day lease is still valid, bypass network entirely
+        if (current_time - last_verified) < LEASE_DURATION:
+            return True
+
+        # Lease expired: Attempt silent background refresh via heartbeat
+        print("\033[K🌶  Refreshing license...", end="\r")
         try:
-            with open(TOKEN_FILE, "r") as f:
-                creds = json.load(f)
-            
-            email = creds.get("email")
-            last_verified = creds.get("last_verified", 0)
-            current_time = time.time()
-
-            # If the 14-day lease is still valid, bypass network entirely
-            if (current_time - last_verified) < LEASE_DURATION:
+            res = requests.post(
+                f"{API_BASE}/license_heartbeat",
+                json={"email": email, "device_uuid": hw_id, "product": product},
+                timeout=4
+            )
+            if res.status_code == 200:
+                license_data["last_verified"] = current_time
+                config[product_key] = license_data
+                save_config(config)
+                print("\033[K", end="")
                 return True
-
-            # Lease expired: Attempt silent background refresh
-            print("\033[K🌶  Refreshing license...", end="\r")
-            try:
-                res = requests.post(f"{API_BASE}/validate_device",
-                                    json={"email": email, "device_uuid": hw_id},
-                                    timeout=4)
-                if res.status_code == 200:
-                    creds["last_verified"] = current_time
-                    with open(TOKEN_FILE, "w") as f:
-                        json.dump(creds, f)
-                    print("\033[K", end="") # Clear refresh line
-                    return True
-                elif res.status_code == 403:
-                    print(f"\n❌ License revoked or moved: {res.text}")
-                    os.remove(TOKEN_FILE)
-                    sys.exit(1)
-            except requests.exceptions.RequestException:
-                # Offline Grace Period: Let them in if server is unreachable
-                return True
-        except (json.JSONDecodeError, KeyError):
-            pass
+            elif res.status_code == 403:
+                error_text = res.text
+                if "Device limit" in error_text or "not registered" in error_text:
+                    print(f"\n❌ {error_text}")
+                    print(f"   Run 'zest --uninstall --{product}' on another device to free a slot.")
+                else:
+                    print(f"\n❌ License issue: {error_text}")
+                del config[product_key]
+                save_config(config)
+                sys.exit(1)
+            elif res.status_code == 404:
+                print("\n❌ License not found. Please re-purchase or contact support.")
+                del config[product_key]
+                save_config(config)
+                sys.exit(1)
+        except requests.exceptions.RequestException:
+            # Offline Grace Period: Let them in if server is unreachable
+            return True
 
     # 2. Welcome/OTP Flow (For new devices or expired/revoked licenses)
-    print("\n🍋 Welcome to Zest! Activation Required.")
+
+    # Check if model already exists (reinstall scenario)
+    if os.path.exists(model_path):
+        print(f"\n🍋 {product_name} model is already installed on this device.")
+        print("   Options:")
+        print("   1. Continue to re-activate license (keeps existing model)")
+        print("   2. Cancel")
+        choice = input("\n   Enter choice [1/2]: ").strip()
+        if choice != "1":
+            print("❌ Cancelled.")
+            sys.exit(0)
+        print()
+
+    print(f"🍋 Activation required for {product_name}.")
     email = input("Enter your purchase email: ").strip()
 
     print(f"🌶  Sending code to {email}...", end="\r")
     try:
-        otp_res = requests.post(f"{API_BASE}/send_otp", json={"email": email})
+        otp_res = requests.post(
+            f"{API_BASE}/send_otp",
+            json={"email": email, "product": product}
+        )
         if otp_res.status_code != 200:
             print(f"\n❌ Error: {otp_res.text}")
             sys.exit(1)
@@ -109,19 +432,21 @@ def authenticate():
     nickname = platform.node()
 
     # Final Verification and Device Registration
-    verify_res = requests.post(f"{API_BASE}/verify_otp_and_register",
-                            json={
-                                "email": email,
-                                "otp": code,
-                                "device_uuid": hw_id,
-                                "device_nickname": nickname
-                            })
+    verify_res = requests.post(
+        f"{API_BASE}/verify_otp_and_register",
+        json={
+            "email": email,
+            "otp": code,
+            "device_uuid": hw_id,
+            "device_nickname": nickname,
+            "product": product
+        }
+    )
 
     if verify_res.status_code == 200:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        with open(TOKEN_FILE, "w") as f:
-            json.dump({"email": email, "last_verified": time.time()}, f)
-        print("✅ Success! Device linked.")
+        config[product_key] = {"email": email, "last_verified": time.time()}
+        save_config(config)
+        print(f"✅ Success! Device linked for {product_name}.")
         return True
     else:
         print(f"❌ Activation failed: {verify_res.text}")
@@ -244,16 +569,12 @@ def suppress_c_logs():
         os.close(saved_stderr_fd)
 
 
-def load_model() -> Llama:
+def load_model(product: str) -> Llama:
     """Load the LLM model with GPU acceleration fallback to CPU."""
-    if os.path.exists(MODEL_PATH_FP16):
-        model_path = MODEL_PATH_FP16
-    elif os.path.exists(MODEL_PATH_Q5):
-        model_path = MODEL_PATH_Q5
-    else:
-        sys.stderr.write(f"❌ Error: Model not found. Expected one of:\n")
-        sys.stderr.write(f"   - {MODEL_PATH_FP16}\n")
-        sys.stderr.write(f"   - {MODEL_PATH_Q5}\n")
+    model_path = PRODUCTS[product]["path"]
+    if not os.path.exists(model_path):
+        sys.stderr.write(f"❌ Error: Model not found at {model_path}\n")
+        sys.stderr.write("   Please ensure Zest is properly installed.\n")
         sys.exit(1)
 
     recommended_threads = max(1, multiprocessing.cpu_count() // 2)
@@ -351,52 +672,261 @@ def prompt_for_context(user_context: str | None) -> tuple[str | None, bool]:
         return context_input, True
     return user_context, False
 
+def handle_logout(product: str | None):
+    """
+    Log out from a product - removes license but keeps model files.
+    Deregisters device from Firestore.
+    """
+    config = load_config()
+    hw_id = get_hw_id()
+    products_to_logout = [product] if product else list(PRODUCTS.keys())
+    any_logged_out = False
+
+    for p in products_to_logout:
+        product_key = f"{p}_license"
+        license_data = config.get(product_key)
+
+        if not license_data:
+            if product:  # Only show if specific product requested
+                print(f"🍋 Not logged in for {PRODUCTS[p]['name']}.")
+            continue
+
+        email = license_data.get("email")
+        if email:
+            print(f"🌶  Deregistering {PRODUCTS[p]['name']}...", end="\r")
+            try:
+                res = requests.post(
+                    f"{API_BASE}/deregister_device",
+                    json={"email": email, "device_uuid": hw_id, "product": p},
+                    timeout=10
+                )
+                if res.status_code == 200:
+                    print(f"\033[K🍋 Device deregistered from {PRODUCTS[p]['name']} license.")
+                else:
+                    print(f"\033[K⚠️  Could not deregister: {res.text}")
+            except requests.exceptions.RequestException:
+                print(f"\033[K⚠️  Could not reach server. Device may still be registered.")
+
+        del config[product_key]
+        any_logged_out = True
+
+    save_config(config)
+    if any_logged_out:
+        print("🍋 Logout complete. Model files kept on disk.")
+        print("   Use --uninstall to also remove model files.")
+
+
+def handle_uninstall(product: str | None):
+    """
+    Uninstall a product - removes license, model files, and deregisters device.
+    """
+    config = load_config()
+    hw_id = get_hw_id()
+    products_to_uninstall = [product] if product else list(PRODUCTS.keys())
+    any_uninstalled = False
+
+    for p in products_to_uninstall:
+        product_key = f"{p}_license"
+        license_data = config.get(product_key)
+        model_path = PRODUCTS[p]["path"]
+        model_exists = os.path.exists(model_path)
+
+        # Deregister from server if we have license data
+        if license_data:
+            email = license_data.get("email")
+            if email:
+                print(f"🌶  Deregistering {PRODUCTS[p]['name']}...", end="\r")
+                try:
+                    res = requests.post(
+                        f"{API_BASE}/deregister_device",
+                        json={"email": email, "device_uuid": hw_id, "product": p},
+                        timeout=10
+                    )
+                    if res.status_code == 200:
+                        print(f"\033[K🍋 Device deregistered from {PRODUCTS[p]['name']} license.")
+                    else:
+                        print(f"\033[K⚠️  Could not deregister: {res.text}")
+                except requests.exceptions.RequestException:
+                    print(f"\033[K⚠️  Could not reach server. Device may still be registered.")
+
+            del config[product_key]
+            any_uninstalled = True
+
+        # Delete model file
+        if model_exists:
+            try:
+                os.remove(model_path)
+                print(f"🗑️  Deleted {PRODUCTS[p]['name']} model file.")
+                any_uninstalled = True
+            except OSError as e:
+                print(f"⚠️  Could not delete model file: {e}")
+        elif product:  # Only show if specific product requested
+            print(f"🍋 {PRODUCTS[p]['name']} model not installed.")
+
+    save_config(config)
+
+    # Clean up empty .zest directory
+    if os.path.exists(ZEST_DIR) and not os.listdir(ZEST_DIR):
+        try:
+            os.rmdir(ZEST_DIR)
+        except OSError:
+            pass
+
+    # Clean up config if empty
+    config = load_config()
+    if not any(k.endswith("_license") for k in config.keys()):
+        # No licenses left, clean up config directory
+        if os.path.exists(CONFIG_FILE):
+            try:
+                os.remove(CONFIG_FILE)
+            except OSError:
+                pass
+        if os.path.exists(CONFIG_DIR) and not os.listdir(CONFIG_DIR):
+            try:
+                os.rmdir(CONFIG_DIR)
+            except OSError:
+                pass
+
+    if any_uninstalled:
+        print("🍋 Uninstall complete.")
+
+
+def handle_model_switch(product: str):
+    """Switch active model preference."""
+    if product not in PRODUCTS:
+        print(f"❌ Invalid product. Use: --fp or --q5")
+        sys.exit(1)
+
+    model_path = PRODUCTS[product]["path"]
+    if not os.path.exists(model_path):
+        print(f"❌ {PRODUCTS[product]['name']} model not installed.")
+        print(f"   Expected at: {model_path}")
+        sys.exit(1)
+
+    config = load_config()
+    config["active_product"] = product
+    save_config(config)
+    print(f"✅ Switched to {PRODUCTS[product]['name']} model.")
+
+
 def main():
     # 1. Handle Administrative Flags
     if len(sys.argv) > 1:
-        flag = sys.argv[1].lower().strip()
-        if flag == "--logout":
-            if os.path.exists(TOKEN_FILE):
-                try:
-                    with open(TOKEN_FILE, "r") as f:
-                        creds = json.load(f)
-                    email = creds.get("email")
-                    hw_id = get_hw_id()
+        args = [a.lower().strip() for a in sys.argv[1:]]
 
-                    if email and hw_id:
-                        print("🍋 Deregistering device...", end="\r")
-                        try:
-                            res = requests.post(
-                                f"{API_BASE}/deregister_device",
-                                json={"email": email, "device_uuid": hw_id},
-                                timeout=10
-                            )
-                            if res.status_code == 200:
-                                print("\033[K🍋 Device deregistered from license.")
-                            else:
-                                print(f"\033[K⚠️  Could not deregister device: {res.text}")
-                        except requests.exceptions.RequestException:
-                            print("\033[K⚠️  Could not reach server. Device may still be registered.")
-
-                    os.remove(TOKEN_FILE)
-                    print("🍋 Logged out successfully.")
-                except (json.JSONDecodeError, KeyError):
-                    os.remove(TOKEN_FILE)
-                    print("🍋 Logged out successfully.")
-            else:
-                print("🍋 You are not currently logged in.")
-            sys.exit(0)
-        if flag in ["--help", "-h"]:
+        # --help
+        if "--help" in args or "-h" in args:
+            print(f"Zest CLI v{VERSION}")
+            print("")
             print("Usage: zest \"your query\"")
-            print("Flags: --logout")
+            print("")
+            print("Model Management:")
+            print("  --model --fp    Switch to FP16 model")
+            print("  --model --q5    Switch to Q5 model")
+            print("")
+            print("Account Management:")
+            print("  --logout        Log out (keeps model files, frees device slot)")
+            print("  --logout --fp   Log out from FP16 only")
+            print("  --logout --q5   Log out from Q5 only")
+            print("")
+            print("  --uninstall     Full uninstall (deletes model + license)")
+            print("  --uninstall --fp   Uninstall FP16 only")
+            print("  --uninstall --q5   Uninstall Q5 only")
+            print("")
+            print("Updates:")
+            print("  --update        Check for and download updates")
+            print("  --update --fp   Check for FP16 updates")
+            print("  --update --q5   Check for Q5 updates")
+            print("")
+            print("Info:")
+            print("  --status        Show current model and license status")
+            print("  --version       Show version")
+            sys.exit(0)
+
+        # --version
+        if "--version" in args or "-v" in args:
+            print(f"Zest CLI v{VERSION}")
+            sys.exit(0)
+
+        # --update (force update check)
+        if "--update" in args:
+            product = None
+            if "--fp" in args or "--fp16" in args:
+                product = "fp16"
+            elif "--q5" in args:
+                product = "q5"
+            else:
+                product = get_active_product()
+
+            # Clear last check time to force check
+            config = load_config()
+            config["last_update_check"] = 0
+            save_config(config)
+
+            print(f"🍋 Checking for updates ({PRODUCTS[product]['name']})...")
+            check_for_updates(product)
+            print("✅ Update check complete.")
+            sys.exit(0)
+
+        # --status
+        if "--status" in args:
+            config = load_config()
+            active = get_active_product()
+            print(f"🍋 Zest Status (CLI v{VERSION})")
+            print(f"   Active model: {PRODUCTS[active]['name']}")
+            print("")
+            for p, info in PRODUCTS.items():
+                installed = "✅" if os.path.exists(info["path"]) else "❌"
+                license_key = f"{p}_license"
+                licensed = "✅" if config.get(license_key) else "❌"
+                model_ver = get_model_version(p)
+                print(f"   {info['name']}:")
+                print(f"      Installed: {installed} | Licensed: {licensed} | Model v{model_ver}")
+            print("")
+            print("   Run 'zest --update' to check for updates.")
+            sys.exit(0)
+
+        # --model --fp or --model --q5
+        if "--model" in args:
+            if "--fp" in args or "--fp16" in args:
+                handle_model_switch("fp16")
+            elif "--q5" in args:
+                handle_model_switch("q5")
+            else:
+                print("❌ Specify model: --model --fp or --model --q5")
+            sys.exit(0)
+
+        # --logout (keeps model files)
+        if "--logout" in args:
+            product = None
+            if "--fp" in args or "--fp16" in args:
+                product = "fp16"
+            elif "--q5" in args:
+                product = "q5"
+            handle_logout(product)
+            sys.exit(0)
+
+        # --uninstall (removes model files too)
+        if "--uninstall" in args:
+            product = None
+            if "--fp" in args or "--fp16" in args:
+                product = "fp16"
+            elif "--q5" in args:
+                product = "q5"
+            handle_uninstall(product)
             sys.exit(0)
 
     # 2. Guard against empty queries (check before auth to avoid unnecessary auth)
     if len(sys.argv) < 2:
         print("Usage: zest \"your query here\"")
+        print("       zest --help for more options")
         sys.exit(0)
 
     query = " ".join(sys.argv[1:])
+
+    # 2.5. Check for orphaned installations (app deleted but files remain)
+    if check_for_orphaned_installation():
+        sys.exit(0)
 
     # 3. Query quality checks
     is_good_query, word_count, has_vague, likely_mangled = check_query_quality(query)
@@ -427,11 +957,15 @@ def main():
             sys.exit(0)
         print()
 
-    # 4. Licensing Gatekeeper
-    authenticate()
+    # 4. Determine active product and authenticate
+    active_product = get_active_product()
+    authenticate(active_product)
+
+    # 4.5. Check for updates (silent, non-blocking)
+    check_for_updates(active_product)
 
     # 5. Load model
-    llm = load_model()
+    llm = load_model(active_product)
 
     # 6. Core AI Logic with retry loop
     failed_history: list[tuple[str, str]] = []

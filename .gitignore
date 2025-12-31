@@ -35,3 +35,14 @@ firebase-debug.*.log
 
 # Python
 __pycache__/
+
+# macOS
+.DS_Store
+
+# Terraform plan files
+*.tfplan
+tfplan
+
+# Zest CLI build artifacts
+zest_cli/build/
+zest_cli/dist/

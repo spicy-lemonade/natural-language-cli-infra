@@ -82,3 +82,18 @@ output "firestore_prod_database_id" {
   description = "Fully qualified ID of the Firestore prod database"
   value       = google_firestore_database.prod.id
 }
+
+output "models_bucket_name" {
+  description = "Name of the models distribution bucket"
+  value       = google_storage_bucket.nlcli_models.name
+}
+
+output "models_bucket_url" {
+  description = "GCS URL of the models bucket"
+  value       = google_storage_bucket.nlcli_models.url
+}
+
+output "models_public_url" {
+  description = "Public HTTPS URL for downloading models"
+  value       = "https://storage.googleapis.com/${google_storage_bucket.nlcli_models.name}"
+}
