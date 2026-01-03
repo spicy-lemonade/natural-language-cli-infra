@@ -79,11 +79,11 @@ def save_config(config: dict):
 def check_for_orphaned_installation(active_product: str) -> bool:
     """
     Check if app bundle has been deleted but files remain for the ACTIVE product only.
-    Triggers if user went through DMG installation (has setup marker or license).
+    Delegates to cleanup.sh for the actual cleanup work.
     Returns True if orphaned installation was detected and user chose to clean up.
     """
     config = load_config()
-    hw_id = get_hw_id()
+    cleanup_script = os.path.join(ZEST_DIR, "cleanup.sh")
 
     # Only check the active product, not all products
     product = active_product
@@ -103,65 +103,20 @@ def check_for_orphaned_installation(active_product: str) -> bool:
     # 2. App bundle is missing
     # 3. User went through DMG installation (has setup marker or license)
     if os.path.exists(model_path) and not os.path.exists(app_path) and was_installed_via_dmg:
-        print(f"\n⚠️  Zest {PRODUCTS[product]['name']} app was removed from Applications.")
-        if license_data:
-            print("   Model files and license still exist on this device.")
-        else:
-            print("   Model files still exist on this device.")
-        print("")
-        print("   Options:")
-        if license_data:
-            print("   1. Clean up (remove model files and free license slot)")
-        else:
-            print("   1. Clean up (remove model files)")
-        print("   2. Keep files (reinstall from DMG to continue using Zest)")
-        print("")
-
-        while True:
-            choice = input("   Enter choice [1/2]: ").strip()
-            if choice in ("1", "2"):
-                break
-            print("   Invalid choice. Please enter 1 or 2.")
-
-        if choice == "1":
-            # Deregister from server
-            email = license_data.get("email")
-            nickname = license_data.get("device_nickname", "this device")
-            if email:
-                print(f"🌶  Deregistering \"{nickname}\"...", end="\r")
-                try:
-                    res = requests.post(
-                        f"{API_BASE}/deregister_device",
-                        json={"email": email, "device_uuid": hw_id, "product": product},
-                        timeout=10
-                    )
-                    if res.status_code == 200:
-                        print(f"\033[K🍋 \"{nickname}\" deregistered.")
-                    else:
-                        print(f"\033[K⚠️  Could not deregister: {res.text}")
-                except requests.exceptions.RequestException:
-                    print("\033[K⚠️  Could not reach server.")
-
-            del config[product_key]
-
-            # Delete model file
+        # Delegate to cleanup.sh which handles orphan detection and cleanup
+        if os.path.exists(cleanup_script):
             try:
-                os.remove(model_path)
-                print(f"🗑️  Removed {PRODUCTS[product]['name']} model file.")
-            except OSError as e:
-                print(f"⚠️  Could not delete model: {e}")
+                result = subprocess.run([cleanup_script], check=False)
+                return result.returncode == 0
+            except (subprocess.SubprocessError, OSError):
+                pass
 
-            save_config(config)
-
-            # Clean up empty directories
-            if os.path.exists(ZEST_DIR) and not os.listdir(ZEST_DIR):
-                try:
-                    os.rmdir(ZEST_DIR)
-                except OSError:
-                    pass
-
-            print("🍋 Cleanup complete.")
-            return True
+        # Fallback message if cleanup.sh not available
+        print(f"\n⚠️  Zest {PRODUCTS[product]['name']} app was removed from Applications.")
+        print("   Model files still exist on this device.")
+        print("")
+        print("   Run 'zest --uninstall' to clean up.")
+        return True
 
     return False
 
@@ -965,130 +920,27 @@ def handle_remote_logout(product: str | None):
 
 def handle_uninstall(product: str | None):
     """
-    Uninstall a product - removes license, model files, and deregisters device.
+    Uninstall a product - delegates to cleanup.sh for actual cleanup work.
+    cleanup.sh handles: deregistration, model deletion, app removal, config cleanup.
     """
-    config = load_config()
-    hw_id = get_hw_id()
+    cleanup_script = os.path.join(ZEST_DIR, "cleanup.sh")
 
-    # If no product specified, check how many are installed and prompt
-    if product is None:
-        installed_products = [p for p in PRODUCTS.keys() if os.path.exists(PRODUCTS[p]["path"])]
+    # Build the command for cleanup.sh
+    cmd = [cleanup_script, "--uninstall"]
+    if product == "fp16":
+        cmd.append("--fp")
+    elif product == "q5":
+        cmd.append("--q5")
 
-        if len(installed_products) == 0:
-            print("🍋 No Zest models are installed.")
-            return
-        elif len(installed_products) == 1:
-            product = installed_products[0]
-            products_to_uninstall = [product]
-        else:
-            # Both installed - prompt user
-            print("🍋 Both models are installed:")
-            print("   1. FP16 (Full Precision)")
-            print("   2. Q5 (Quantized)")
-            print("   3. Both")
-            print("")
-            choice = input("Which would you like to uninstall? [1/2/3]: ").strip()
-
-            if choice == "1":
-                products_to_uninstall = ["fp16"]
-            elif choice == "2":
-                products_to_uninstall = ["q5"]
-            elif choice == "3":
-                products_to_uninstall = list(PRODUCTS.keys())
-            else:
-                print("❌ Invalid choice. Cancelled.")
-                return
-    else:
-        products_to_uninstall = [product]
-
-    any_uninstalled = False
-
-    for p in products_to_uninstall:
-        product_key = f"{p}_license"
-        license_data = config.get(product_key)
-        model_path = PRODUCTS[p]["path"]
-        model_exists = os.path.exists(model_path)
-
-        # Deregister from server if we have license data
-        if license_data:
-            email = license_data.get("email")
-            nickname = license_data.get("device_nickname", "this device")
-            if email:
-                print(f"🌶  Deregistering \"{nickname}\" from {PRODUCTS[p]['name']}...", end="\r")
-                try:
-                    res = requests.post(
-                        f"{API_BASE}/deregister_device",
-                        json={"email": email, "device_uuid": hw_id, "product": p},
-                        timeout=10
-                    )
-                    if res.status_code == 200:
-                        print(f"\033[K🍋 \"{nickname}\" deregistered from {PRODUCTS[p]['name']} license.")
-                    else:
-                        print(f"\033[K⚠️  Could not deregister: {res.text}")
-                except requests.exceptions.RequestException:
-                    print(f"\033[K⚠️  Could not reach server. Device may still be registered.")
-
-            del config[product_key]
-            any_uninstalled = True
-
-        # Delete model file
-        if model_exists:
-            try:
-                os.remove(model_path)
-                print(f"🗑️  Deleted {PRODUCTS[p]['name']} model file.")
-                any_uninstalled = True
-
-                # Create uninstall marker to prevent auto-reinstall
-                marker_path = os.path.join(ZEST_DIR, f".{p}_uninstalled")
-                os.makedirs(ZEST_DIR, exist_ok=True)
-                with open(marker_path, "w") as f:
-                    f.write("")
-
-                # Remove setup marker so first-run setup runs again on reinstall
-                setup_marker = os.path.join(ZEST_DIR, f".{p}_setup_complete")
-                if os.path.exists(setup_marker):
-                    os.remove(setup_marker)
-            except OSError as e:
-                print(f"⚠️  Could not delete model file: {e}")
-        elif product:  # Only show if specific product requested
-            print(f"🍋 {PRODUCTS[p]['name']} model not installed.")
-
-        # Delete app bundle from /Applications/
-        app_path = APP_PATHS.get(p)
-        if app_path and os.path.exists(app_path):
-            try:
-                subprocess.run(["rm", "-rf", app_path], check=True)
-                print(f"🗑️  Removed {PRODUCTS[p]['name']} app from Applications.")
-                any_uninstalled = True
-            except subprocess.CalledProcessError as e:
-                print(f"⚠️  Could not remove app bundle: {e}")
-
-    save_config(config)
-
-    # Clean up empty .zest directory
-    if os.path.exists(ZEST_DIR) and not os.listdir(ZEST_DIR):
+    if os.path.exists(cleanup_script):
+        # Delegate to cleanup.sh (source of truth for cleanup operations)
         try:
-            os.rmdir(ZEST_DIR)
-        except OSError:
-            pass
-
-    # Clean up config if empty
-    config = load_config()
-    if not any(k.endswith("_license") for k in config.keys()):
-        # No licenses left, clean up config directory
-        if os.path.exists(CONFIG_FILE):
-            try:
-                os.remove(CONFIG_FILE)
-            except OSError:
-                pass
-        if os.path.exists(CONFIG_DIR) and not os.listdir(CONFIG_DIR):
-            try:
-                os.rmdir(CONFIG_DIR)
-            except OSError:
-                pass
-
-    if any_uninstalled:
-        print("🍋 Uninstall complete.")
+            subprocess.run(cmd, check=False)
+        except (subprocess.SubprocessError, OSError) as e:
+            print(f"⚠️  Cleanup script error: {e}")
+    else:
+        print("❌ Cleanup script not found.")
+        print("   Please reinstall Zest from the DMG to restore cleanup functionality.")
 
 
 def handle_model_switch(product: str):
