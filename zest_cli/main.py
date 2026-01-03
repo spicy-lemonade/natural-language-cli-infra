@@ -746,14 +746,36 @@ def prompt_for_context(user_context: str | None) -> tuple[str | None, bool]:
         return context_input, True
     return user_context, False
 
-def handle_logout(product: str | None):
+def handle_logout(product: str | None, remote: bool = False):
     """
     Log out from a product - removes license but keeps model files.
+    If remote=True, allows logging out any registered device (requires OTP).
     Deregisters device from Firestore.
     """
     config = load_config()
     hw_id = get_hw_id()
-    products_to_logout = [product] if product else list(PRODUCTS.keys())
+
+    # Determine product to logout
+    if product:
+        products_to_logout = [product]
+    else:
+        # Check which products are licensed locally
+        licensed_products = [p for p in PRODUCTS.keys() if config.get(f"{p}_license")]
+        if licensed_products:
+            products_to_logout = licensed_products
+        else:
+            # No local license - must use remote logout
+            if not remote:
+                print("🍋 Not logged in on this device.")
+                print("   Use --logout --remote to log out a device remotely.")
+                return
+            products_to_logout = list(PRODUCTS.keys())
+
+    # Remote logout flow
+    if remote:
+        handle_remote_logout(products_to_logout[0] if len(products_to_logout) == 1 else None)
+        return
+
     any_logged_out = False
 
     for p in products_to_logout:
@@ -789,6 +811,138 @@ def handle_logout(product: str | None):
     if any_logged_out:
         print("🍋 Logout complete. Model files kept on disk.")
         print("   Use --uninstall to also remove model files.")
+
+
+def handle_remote_logout(product: str | None):
+    """
+    Remote logout: deregister any device (not just the current one).
+    Requires OTP verification for security.
+    """
+    print("🍋 Remote Device Logout")
+    print("   This lets you deregister any device from your license.")
+    print("")
+
+    email = input("Enter your purchase email: ").strip()
+    if not email:
+        print("❌ Email is required.")
+        return
+
+    # Determine product
+    if product is None:
+        print("")
+        print("Which product license?")
+        print("   1. FP16 (Full Precision)")
+        print("   2. Q5 (Quantized)")
+        choice = input("Enter choice [1/2]: ").strip()
+        if choice == "1":
+            product = "fp16"
+        elif choice == "2":
+            product = "q5"
+        else:
+            print("❌ Invalid choice.")
+            return
+
+    product_name = PRODUCTS[product]["name"]
+
+    # Send OTP
+    print(f"\n🌶  Sending verification code to {email}...", end="\r")
+    try:
+        otp_res = requests.post(
+            f"{API_BASE}/send_otp",
+            json={"email": email, "product": product},
+            timeout=10
+        )
+        if otp_res.status_code != 200:
+            print(f"\033[K❌ Error: {otp_res.text}")
+            return
+    except requests.exceptions.RequestException as e:
+        print(f"\033[K❌ Connection error: {e}")
+        return
+
+    print("\033[K📧 Verification code sent!")
+    code = input("Enter the 6-digit code: ").strip()
+    if not code:
+        print("❌ Code is required.")
+        return
+
+    # Get device list
+    print(f"\n🌶  Fetching registered devices...", end="\r")
+    try:
+        list_res = requests.post(
+            f"{API_BASE}/list_devices",
+            json={"email": email, "otp": code, "product": product},
+            timeout=10
+        )
+        if list_res.status_code != 200:
+            print(f"\033[K❌ Error: {list_res.text}")
+            return
+
+        data = list_res.json()
+        devices = data.get("devices", [])
+    except requests.exceptions.RequestException as e:
+        print(f"\033[K❌ Connection error: {e}")
+        return
+    except json.JSONDecodeError:
+        print(f"\033[K❌ Invalid response from server.")
+        return
+
+    print("\033[K")
+
+    if not devices:
+        print(f"🍋 No devices registered for {product_name}.")
+        return
+
+    # Display devices
+    print(f"📱 Registered devices for {product_name}:")
+    print("")
+    hw_id = get_hw_id()
+    for i, device in enumerate(devices, 1):
+        is_current = " (this device)" if device["uuid"] == hw_id else ""
+        print(f"   {i}) {device['nickname']}{is_current}")
+    print(f"   {len(devices) + 1}) Cancel")
+    print("")
+
+    # Get selection
+    while True:
+        choice = input("Which device to deregister? ").strip()
+        if choice.isdigit():
+            choice_num = int(choice)
+            if choice_num == len(devices) + 1:
+                print("❌ Cancelled.")
+                return
+            if 1 <= choice_num <= len(devices):
+                break
+        print(f"   Please enter a number between 1 and {len(devices) + 1}.")
+
+    selected_device = devices[choice_num - 1]
+
+    # Deregister selected device
+    print(f"\n🌶  Deregistering \"{selected_device['nickname']}\"...", end="\r")
+    try:
+        dereg_res = requests.post(
+            f"{API_BASE}/deregister_device",
+            json={
+                "email": email,
+                "device_uuid": selected_device["uuid"],
+                "product": product
+            },
+            timeout=10
+        )
+        if dereg_res.status_code == 200:
+            print(f"\033[K🍋 \"{selected_device['nickname']}\" deregistered from {product_name}.")
+
+            # If we deregistered the current device, clear local config
+            if selected_device["uuid"] == hw_id:
+                config = load_config()
+                product_key = f"{product}_license"
+                if product_key in config:
+                    del config[product_key]
+                    save_config(config)
+                    print("   Local license data cleared.")
+        else:
+            print(f"\033[K⚠️  Could not deregister: {dereg_res.text}")
+    except requests.exceptions.RequestException:
+        print(f"\033[K⚠️  Could not reach server.")
 
 
 def handle_uninstall(product: str | None):
@@ -871,6 +1025,11 @@ def handle_uninstall(product: str | None):
                 os.makedirs(ZEST_DIR, exist_ok=True)
                 with open(marker_path, "w") as f:
                     f.write("")
+
+                # Remove setup marker so first-run setup runs again on reinstall
+                setup_marker = os.path.join(ZEST_DIR, f".{p}_setup_complete")
+                if os.path.exists(setup_marker):
+                    os.remove(setup_marker)
             except OSError as e:
                 print(f"⚠️  Could not delete model file: {e}")
         elif product:  # Only show if specific product requested
@@ -948,9 +1107,10 @@ def main():
             print("  --model --q5    Switch to Q5 model")
             print("")
             print("Account Management:")
-            print("  --logout        Log out (keeps model files, frees device slot)")
-            print("  --logout --fp   Log out from FP16 only")
-            print("  --logout --q5   Log out from Q5 only")
+            print("  --logout           Log out current device (keeps model files)")
+            print("  --logout --fp      Log out from FP16 only")
+            print("  --logout --q5      Log out from Q5 only")
+            print("  --logout --remote  Log out ANY device remotely (requires OTP)")
             print("")
             print("  --uninstall     Full uninstall (deletes model + license + app)")
             print("  --uninstall --fp   Uninstall FP16 only")
@@ -1025,11 +1185,12 @@ def main():
         # --logout (keeps model files)
         if "--logout" in args:
             product = None
+            remote = "--remote" in args
             if "--fp" in args or "--fp16" in args:
                 product = "fp16"
             elif "--q5" in args:
                 product = "q5"
-            handle_logout(product)
+            handle_logout(product, remote=remote)
             sys.exit(0)
 
         # --uninstall (removes model files too)

@@ -255,8 +255,17 @@ def verify_otp_and_register(req: https_fn.Request) -> https_fn.Response:
     devices = license_data.get(devices_field, [])
 
     # Check if device already registered for this product
-    for device in devices:
+    for i, device in enumerate(devices):
         if device["uuid"] == device_uuid:
+            # Update nickname if it changed or was missing
+            if device.get("nickname") != device_nickname:
+                devices[i]["nickname"] = device_nickname
+                doc_ref.update({
+                    devices_field: devices,
+                    "otp_code": firestore.DELETE_FIELD,
+                    "otp_expiry": firestore.DELETE_FIELD
+                })
+                return https_fn.Response(f"Device nickname updated for {product}", status=200)
             return https_fn.Response(f"Device already registered for {product}", status=200)
 
     if len(devices) >= MAX_DEVICES_PER_PRODUCT:
@@ -400,6 +409,87 @@ def replace_device(req: https_fn.Request) -> https_fn.Response:
 
     doc_ref.update({devices_field: devices})
     return https_fn.Response(f"Device replaced for {product}", status=200)
+
+
+@https_fn.on_request(
+    region="europe-west1",
+    cors=options.CorsOptions(
+        cors_origins="*",
+        cors_methods=["POST"],
+    ),
+)
+def list_devices(req: https_fn.Request) -> https_fn.Response:
+    """
+    List all registered devices for a user's product license.
+    Requires OTP verification for security.
+    Expects JSON: {"email": "...", "otp": "123456", "product": "fp16" or "q5"}
+    Returns JSON: {"devices": [{"uuid": "...", "nickname": "...", "registered_at": "..."}]}
+    """
+    try:
+        data = req.get_json()
+    except Exception:
+        return https_fn.Response("Invalid JSON", status=400)
+
+    email = data.get("email")
+    otp = data.get("otp")
+    product = data.get("product", "q5")
+
+    if not email or not otp:
+        return https_fn.Response("Missing email or otp", status=400)
+
+    if product not in VALID_PRODUCTS:
+        return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
+
+    paid_field, devices_field, _ = get_product_fields(product)
+
+    db = firestore.client()
+    doc_ref = db.collection("licenses").document(email)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        return https_fn.Response("No license found", status=404)
+
+    license_data = doc.to_dict()
+
+    # Verify OTP
+    stored_otp = license_data.get("otp_code")
+    otp_expiry = license_data.get("otp_expiry")
+
+    if not stored_otp or not otp_expiry:
+        return https_fn.Response("No OTP found. Please request a new one.", status=400)
+
+    if datetime.now(timezone.utc) > otp_expiry:
+        return https_fn.Response("OTP expired. Please request a new one.", status=400)
+
+    if stored_otp != otp:
+        return https_fn.Response("Invalid OTP", status=403)
+
+    # Check if user has license for this product
+    if not license_data.get(paid_field):
+        return https_fn.Response(f"No {product} license found", status=403)
+
+    # Get devices
+    devices = license_data.get(devices_field, [])
+    device_list = [
+        {
+            "uuid": d["uuid"],
+            "nickname": d.get("nickname", "Unknown device"),
+            "registered_at": d.get("registered_at", "Unknown")
+        }
+        for d in devices
+    ]
+
+    # Clear OTP after successful use
+    doc_ref.update({
+        "otp_code": firestore.DELETE_FIELD,
+        "otp_expiry": firestore.DELETE_FIELD
+    })
+
+    return https_fn.Response(
+        json.dumps({"devices": device_list}),
+        status=200,
+        content_type="application/json"
+    )
 
 
 @https_fn.on_request(

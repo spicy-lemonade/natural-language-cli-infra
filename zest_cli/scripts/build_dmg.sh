@@ -226,8 +226,12 @@ MAIN_PY_DEST="$HOME/.zest/main.py"
 
 # First-run setup
 SETUP_MARKER="$HOME/.zest/.${PRODUCT_LOWER}_setup_complete"
+UNINSTALL_MARKER="$HOME/.zest/.${PRODUCT_LOWER}_uninstalled"
 if [ ! -f "$SETUP_MARKER" ]; then
     mkdir -p "$HOME/.zest"
+
+    # Remove uninstall marker if present (user is reinstalling)
+    rm -f "$UNINSTALL_MARKER"
 
     # Copy model
     if [ ! -f "$MODEL_DEST" ] && [ -f "$MODEL_SRC" ]; then
