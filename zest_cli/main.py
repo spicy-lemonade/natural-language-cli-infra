@@ -101,10 +101,15 @@ def check_for_orphaned_installation(active_product: str) -> bool:
         print("   Model files and license still exist on this device.")
         print("")
         print("   Options:")
-        print("   1. Clean up (remove model files and deregister device)")
-        print("   2. Keep files (if you plan to reinstall)")
+        print("   1. Clean up (remove model files and free license slot)")
+        print("   2. Keep files (reinstall from DMG to continue using Zest)")
         print("")
-        choice = input("   Enter choice [1/2]: ").strip()
+
+        while True:
+            choice = input("   Enter choice [1/2]: ").strip()
+            if choice in ("1", "2"):
+                break
+            print("   Invalid choice. Please enter 1 or 2.")
 
         if choice == "1":
             # Deregister from server
