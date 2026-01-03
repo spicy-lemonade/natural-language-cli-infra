@@ -79,6 +79,85 @@ python main.py zest show me all running docker containers
 4. **Validation**: 14-day local lease with periodic online sync
 5. **2-Device Limit**: Enforced server-side
 
+## 🗑️ Cleanup Commands
+
+Commands that work even after uninstalling (via standalone `main.py` fallback):
+
+### `zest --status`
+Shows installation and license status for all products:
+```bash
+zest --status
+```
+
+**Example output**:
+```
+🍋 Zest Status (CLI v1.0.0)
+   Active model: FP16 (Full Precision)
+
+   FP16 (Full Precision):
+      Installed: ✅ | Licensed: ✅ | Model v1.0.0
+   Q5 (Quantized):
+      Installed: ❌ | Licensed: ❌ | Model v1.0.0
+```
+
+### `zest --logout`
+Deregisters device and removes license data, but **keeps model files** on disk. Frees up a device slot on your account.
+
+```bash
+# Logout from all products
+zest --logout
+
+# Logout from specific product
+zest --logout --fp
+zest --logout --q5
+```
+
+**What gets removed**:
+- License data from config
+- Device registration on server
+
+**What stays**:
+- Model files in `~/.zest/`
+- App bundle in `/Applications/`
+- CLI wrapper at `/usr/local/bin/zest`
+
+### `zest --uninstall`
+Complete removal: deregisters device, removes license data, **deletes model files**, and removes app bundle from Applications.
+
+```bash
+# Uninstall all products
+zest --uninstall
+
+# Uninstall specific product
+zest --uninstall --fp
+zest --uninstall --q5
+```
+
+**What gets removed**:
+- License data from config
+- Device registration on server
+- Model files (`~/.zest/*.gguf`)
+- App bundle from `/Applications/`
+- Empty directories (`~/.zest/`, config dir)
+
+**What stays**:
+- CLI wrapper at `/usr/local/bin/zest` (for running cleanup commands)
+- Standalone `main.py` at `~/.zest/` (if no models remain)
+- Shell alias in `~/.zshrc` or `~/.bashrc`
+
+**To completely remove Zest**:
+```bash
+sudo rm /usr/local/bin/zest
+rm -rf ~/.zest
+rm -rf ~/Library/Application\ Support/Zest
+# Manually remove alias from ~/.zshrc or ~/.bashrc
+```
+
+### Key Difference: `--logout` vs `--uninstall`
+
+- **`--logout`**: "Free up a device slot but keep model files locally"
+- **`--uninstall`**: "Remove everything (license + model files + app)"
+
 ## 🧪 Testing
 
 **Prerequisites**:

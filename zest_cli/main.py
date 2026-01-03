@@ -876,6 +876,16 @@ def handle_uninstall(product: str | None):
         elif product:  # Only show if specific product requested
             print(f"🍋 {PRODUCTS[p]['name']} model not installed.")
 
+        # Delete app bundle from /Applications/
+        app_path = APP_PATHS.get(p)
+        if app_path and os.path.exists(app_path):
+            try:
+                subprocess.run(["rm", "-rf", app_path], check=True)
+                print(f"🗑️  Removed {PRODUCTS[p]['name']} app from Applications.")
+                any_uninstalled = True
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️  Could not remove app bundle: {e}")
+
     save_config(config)
 
     # Clean up empty .zest directory
@@ -942,7 +952,7 @@ def main():
             print("  --logout --fp   Log out from FP16 only")
             print("  --logout --q5   Log out from Q5 only")
             print("")
-            print("  --uninstall     Full uninstall (deletes model + license)")
+            print("  --uninstall     Full uninstall (deletes model + license + app)")
             print("  --uninstall --fp   Uninstall FP16 only")
             print("  --uninstall --q5   Uninstall Q5 only")
             print("")
@@ -1052,7 +1062,7 @@ def main():
         print("  2. Drag the app to Applications")
         print("  3. Run 'zest' from Terminal")
         print("")
-        print("Visit https://zestcli.com for downloads")
+        print("Visit https://zestcli.com for more information")
         sys.exit(1)
 
     # 2.6. Check for orphaned installations (app deleted but files remain)
