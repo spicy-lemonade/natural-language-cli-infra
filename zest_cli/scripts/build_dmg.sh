@@ -133,6 +133,12 @@ cp "$MODEL_PATH" "$APP_BUNDLE/Contents/Resources/$MODEL_NAME"
 echo "📝 Copying standalone CLI..."
 cp "$PROJECT_DIR/main.py" "$APP_BUNDLE/Contents/Resources/main.py"
 
+# Copy cleanup.sh for shell-based cleanup (no Python required)
+if [ -f "$PROJECT_DIR/resources/cleanup.sh" ]; then
+    cp "$PROJECT_DIR/resources/cleanup.sh" "$APP_BUNDLE/Contents/Resources/cleanup.sh"
+    chmod +x "$APP_BUNDLE/Contents/Resources/cleanup.sh"
+fi
+
 # Copy icon if exists
 if [ -f "$PROJECT_DIR/resources/icon.icns" ]; then
     cp "$PROJECT_DIR/resources/icon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
@@ -245,6 +251,14 @@ if [ ! -f "$SETUP_MARKER" ]; then
         cp "$MAIN_PY_SRC" "$MAIN_PY_DEST"
     fi
 
+    # Copy shell cleanup script (works without Python)
+    CLEANUP_SRC="$RESOURCES_DIR/cleanup.sh"
+    CLEANUP_DEST="$HOME/.zest/cleanup.sh"
+    if [ -f "$CLEANUP_SRC" ]; then
+        cp "$CLEANUP_SRC" "$CLEANUP_DEST"
+        chmod +x "$CLEANUP_DEST"
+    fi
+
     # Create wrapper script at /usr/local/bin/zest
     WRAPPER_PATH="/usr/local/bin/zest"
     WRAPPER_TMP="/tmp/zest_wrapper_$$"
@@ -271,12 +285,19 @@ elif [ -d "$FP16_APP" ]; then
 elif [ -d "$Q5_APP" ]; then
     APP_PATH="$Q5_APP"
 else
-    # No apps found - try standalone Python CLI for cleanup
+    # No apps found - use shell cleanup script (no Python required)
+    SHELL_CLEANUP="$HOME/.zest/cleanup.sh"
     PYTHON_CLI="$HOME/.zest/main.py"
-    if [ -f "$PYTHON_CLI" ]; then
+
+    if [ -f "$SHELL_CLEANUP" ]; then
+        # Shell cleanup handles orphan detection, --uninstall, --status
+        exec "$SHELL_CLEANUP" "$@"
+    elif [ -f "$PYTHON_CLI" ] && command -v python3 >/dev/null 2>&1; then
+        # Fallback to Python if available
         exec python3 "$PYTHON_CLI" "$@"
     else
         echo "❌ Zest is not installed."
+        echo "   Download from https://zestcli.com"
         exit 1
     fi
 fi

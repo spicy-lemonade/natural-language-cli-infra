@@ -79,7 +79,7 @@ def save_config(config: dict):
 def check_for_orphaned_installation(active_product: str) -> bool:
     """
     Check if app bundle has been deleted but files remain for the ACTIVE product only.
-    Only triggers if there was a previous license (indicating user actually used the app).
+    Triggers if user went through DMG installation (has setup marker or license).
     Returns True if orphaned installation was detected and user chose to clean up.
     """
     config = load_config()
@@ -92,16 +92,28 @@ def check_for_orphaned_installation(active_product: str) -> bool:
     product_key = f"{product}_license"
     license_data = config.get(product_key)
 
-    # Only trigger orphan cleanup if:
+    # Check for setup marker (created during first-run DMG setup)
+    setup_marker = os.path.join(ZEST_DIR, f".{product}_setup_complete")
+    # Also check for main.py in .zest (only copied during DMG first-run setup)
+    main_py_marker = os.path.join(ZEST_DIR, "main.py")
+    was_installed_via_dmg = os.path.exists(setup_marker) or os.path.exists(main_py_marker) or license_data
+
+    # Trigger orphan cleanup if:
     # 1. Model exists
     # 2. App bundle is missing
-    # 3. User previously had a license (indicating they used the app, not manual install)
-    if os.path.exists(model_path) and not os.path.exists(app_path) and license_data:
+    # 3. User went through DMG installation (has setup marker or license)
+    if os.path.exists(model_path) and not os.path.exists(app_path) and was_installed_via_dmg:
         print(f"\n⚠️  Zest {PRODUCTS[product]['name']} app was removed from Applications.")
-        print("   Model files and license still exist on this device.")
+        if license_data:
+            print("   Model files and license still exist on this device.")
+        else:
+            print("   Model files still exist on this device.")
         print("")
         print("   Options:")
-        print("   1. Clean up (remove model files and free license slot)")
+        if license_data:
+            print("   1. Clean up (remove model files and free license slot)")
+        else:
+            print("   1. Clean up (remove model files)")
         print("   2. Keep files (reinstall from DMG to continue using Zest)")
         print("")
 
@@ -470,7 +482,7 @@ def authenticate(product: str):
             "device_nickname": nickname
         }
         save_config(config)
-        print(f"✅ Success! Device \"{nickname}\" linked for {product_name}.")
+        print(f"✅ Success! Device \"{nickname}\" linked for {product_name}. Just a moment...")
         return True
     elif verify_res.status_code == 403:
         # Check if device limit reached
@@ -520,7 +532,8 @@ def authenticate(product: str):
                             print("❌ Cancelled.")
                             sys.exit(0)
                     print(f"   Please enter a number between 1 and {len(devices) + 1}.")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, requests.exceptions.JSONDecodeError, ValueError):
+            # Server returned non-JSON response (plain text error)
             pass
         print(f"❌ Activation failed: {verify_res.text}")
         sys.exit(1)
@@ -1281,7 +1294,7 @@ def main():
     temp_increment = 0
 
     while True:
-        print(f"\033[?25l\033[K🌶  Thinking...", end="\r")
+        print(f"\033[K🌶  Thinking...", end="\r", flush=True)
         command = generate_command(
             llm,
             query,
