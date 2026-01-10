@@ -8,6 +8,7 @@ import resend
 from datetime import datetime, timezone, timedelta
 from firebase_functions import https_fn, options
 from firebase_admin import initialize_app, firestore
+from polar_sdk import Polar
 
 # Initialize the Admin SDK once at the top level
 initialize_app()
@@ -16,6 +17,11 @@ initialize_app()
 MAX_DEVICES_PER_PRODUCT = 2
 OTP_EXPIRY_MINUTES = 10
 VALID_PRODUCTS = ["fp16", "q5"]
+
+# Polar product IDs (Sandbox)
+POLAR_PRODUCT_IDS = {
+    "q5": "b85b0e75-2c8b-46ec-81ac-5e6548e5c915",
+}
 
 
 def get_product_fields(product: str) -> tuple:
@@ -116,6 +122,77 @@ def polar_webhook(req: https_fn.Request) -> https_fn.Response:
         )
 
     return https_fn.Response(f"Unhandled event: {event.get('type')}", status=200)
+
+
+@https_fn.on_request(
+    region="europe-west1",
+    secrets=["POLAR_ACCESS_TOKEN"],
+    cors=options.CorsOptions(
+        cors_origins="*",
+        cors_methods=["POST", "OPTIONS"],
+    ),
+)
+def create_checkout(req: https_fn.Request) -> https_fn.Response:
+    """
+    Create a Polar checkout session for a product.
+    Expects JSON: {"product": "q5"}
+    Returns JSON: {"checkout_url": "https://..."}
+    """
+    if req.method == "OPTIONS":
+        return https_fn.Response("", status=204)
+
+    try:
+        data = req.get_json()
+    except Exception:
+        return https_fn.Response(
+            json.dumps({"error": "Invalid JSON"}),
+            status=400,
+            content_type="application/json"
+        )
+
+    product = data.get("product", "q5")
+
+    if product not in POLAR_PRODUCT_IDS:
+        return https_fn.Response(
+            json.dumps({"error": f"Product '{product}' not available for checkout"}),
+            status=400,
+            content_type="application/json"
+        )
+
+    polar_access_token = os.environ.get("POLAR_ACCESS_TOKEN")
+    if not polar_access_token:
+        return https_fn.Response(
+            json.dumps({"error": "Checkout service unavailable"}),
+            status=500,
+            content_type="application/json"
+        )
+
+    success_url = os.environ.get(
+        "POLAR_SUCCESS_URL",
+        "https://zestcli.com/success?checkout_id={CHECKOUT_ID}"
+    )
+
+    try:
+        with Polar(
+            server="sandbox",
+            access_token=polar_access_token,
+        ) as polar:
+            checkout = polar.checkouts.create(request={
+                "products": [POLAR_PRODUCT_IDS[product]],
+                "success_url": success_url
+            })
+
+            return https_fn.Response(
+                json.dumps({"checkout_url": checkout.url}),
+                status=200,
+                content_type="application/json"
+            )
+    except Exception as e:
+        return https_fn.Response(
+            json.dumps({"error": f"Failed to create checkout: {str(e)}"}),
+            status=500,
+            content_type="application/json"
+        )
 
 
 @https_fn.on_request(
