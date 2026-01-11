@@ -28,6 +28,7 @@ import requests
 import time
 import multiprocessing
 import re
+from datetime import datetime, timezone
 
 # --- Configuration ---
 VERSION = "1.0.0"
@@ -35,11 +36,12 @@ MODEL_VERSION = "1.0.0"  # Current model version bundled with this CLI
 ZEST_DIR = os.path.expanduser("~/.zest")
 MODEL_PATH_FP16 = os.path.join(ZEST_DIR, "qwen3_4b_fp16.gguf")
 MODEL_PATH_Q5 = os.path.join(ZEST_DIR, "qwen3_4b_Q5_K_M.gguf")
-API_BASE = "https://europe-west1-nl-cli.cloudfunctions.net"
+API_BASE = "https://europe-west1-nl-cli-dev.cloudfunctions.net"  # TODO: Change back to nl-cli for production
 CONFIG_DIR = os.path.expanduser("~/Library/Application Support/Zest")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 LEASE_DURATION = 1209600  # 14 days in seconds
 UPDATE_CHECK_INTERVAL = 1209600  # Check for updates every 2 weeks (same as lease)
+TRIAL_CHECK_INTERVAL = 30  # TODO: Change back to 86400 (24 hours) for production
 
 # Expected app bundle locations
 APP_PATHS = {
@@ -332,6 +334,267 @@ def get_hw_id():
     cmd = 'ioreg -d2 -c IOPlatformExpertDevice | awk -F"\\"" \'/IOPlatformUUID/{print $(NF-1)}\''
     return subprocess.check_output(cmd, shell=True).decode().strip()
 
+
+def check_trial_status_with_server(email: str, product: str, device_id: str) -> dict:
+    """Check trial status with the server. Returns status dict or None on error."""
+    try:
+        res = requests.post(
+            f"{API_BASE}/check_trial_status",
+            json={"email": email, "product": product, "device_id": device_id},
+            timeout=5
+        )
+        if res.status_code == 200:
+            return res.json()
+    except (requests.exceptions.RequestException, json.JSONDecodeError):
+        pass
+    return None
+
+
+def show_trial_expired_prompt(product: str, email: str) -> bool:
+    """
+    Show options when trial expires.
+    Returns True if user successfully activates a paid license, False otherwise.
+    """
+    product_name = PRODUCTS[product]["name"]
+    print("")
+    print("┌─────────────────────────────────────────────────┐")
+    print(f"│  Your free trial of {product_name} has expired.")
+    print("│")
+    print("│  [1] Purchase Zest")
+    print("│  [2] I already paid - activate my license")
+    print("│  [3] Exit")
+    print("└─────────────────────────────────────────────────┘")
+    print("")
+
+    while True:
+        choice = input("Enter choice [1/2/3]: ").strip()
+        if choice == "1":
+            print("\n🌶 Getting checkout link...", end="\r")
+            try:
+                res = requests.post(
+                    f"{API_BASE}/get_checkout_url",
+                    json={"email": email, "product": product},
+                    timeout=10
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    checkout_url = data.get("checkout_url")
+                    if checkout_url:
+                        print("\033[K")
+                        print(f"🍋 Opening checkout in your browser...")
+                        print(f"   {checkout_url}")
+                        subprocess.run(["open", checkout_url], check=False)
+                        print("")
+                        print("   After payment, run 'zest' again to activate.")
+                        return False
+                print("\033[K❌ Could not get checkout URL. Visit https://zestcli.com")
+            except requests.exceptions.RequestException:
+                print("\033[K❌ Connection error. Visit https://zestcli.com")
+            return False
+        elif choice == "2":
+            return True
+        elif choice == "3":
+            print("👋 Goodbye!")
+            sys.exit(0)
+        else:
+            print("   Please enter 1, 2, or 3.")
+
+
+def start_trial_flow(product: str) -> bool:
+    """
+    Start a free trial for the product.
+    Returns True if trial started successfully, False otherwise.
+    """
+    hw_id = get_hw_id()
+    product_name = PRODUCTS[product]["name"]
+
+    print(f"\n🍋 Start your free trial of {product_name}")
+    email = input("Enter your email: ").strip()
+
+    if not email or "@" not in email:
+        print("❌ Please enter a valid email address.")
+        return False
+
+    print(f"🌶 Sending verification code to {email}...", end="\r")
+    try:
+        otp_res = requests.post(
+            f"{API_BASE}/send_otp",
+            json={"email": email, "product": product, "flow_type": "trial"},
+            timeout=10
+        )
+        if otp_res.status_code == 200:
+            data = otp_res.json()
+            if data.get("status") == "already_paid":
+                print("\033[K🍋 You already have a paid license! Switching to activation flow...")
+                return False
+            if data.get("status") == "trial_expired":
+                print("\033[K")
+                print(f"⚠️  {data.get('message', 'Your trial has expired.')}")
+                if show_trial_expired_prompt(product, email):
+                    return False
+                sys.exit(0)
+        else:
+            print(f"\033[K❌ Error: {otp_res.text}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"\033[K❌ Connection error: {e}")
+        return False
+
+    print("\033[K📧 Verification code sent!")
+    code = input("Enter the 6-digit code: ").strip()
+
+    print("")
+    print("💻 Enter a nickname for this device")
+    print("   (e.g., \"John's laptop\", \"Work MacBook\")")
+    while True:
+        nickname = input("   Nickname: ").strip()
+        if nickname:
+            break
+        print("   ⚠️  Nickname is required.")
+
+    print(f"\n🌶 Starting trial...", end="\r")
+    try:
+        trial_res = requests.post(
+            f"{API_BASE}/start_trial",
+            json={
+                "email": email,
+                "otp_code": code,
+                "product": product,
+                "device_id": hw_id,
+                "device_name": nickname
+            },
+            timeout=10
+        )
+
+        if trial_res.status_code == 200:
+            data = trial_res.json()
+            status = data.get("status")
+
+            if status == "already_paid":
+                print("\033[K🍋 You already have a paid license!")
+                return False
+
+            if status == "trial_expired":
+                print("\033[K")
+                print("⚠️  Your trial has already expired.")
+                if show_trial_expired_prompt(product, email):
+                    return False
+                sys.exit(0)
+
+            if status in ["trial_started", "trial_active"]:
+                expires_at = data.get("trial_expires_at")
+                # Handle both days (production) and minutes (testing)
+                days = data.get("days_remaining")
+                minutes = data.get("minutes_remaining")
+
+                config = load_config()
+                trial_key = f"{product}_trial"
+                config[trial_key] = {
+                    "email": email,
+                    "is_trial": True,
+                    "trial_expires_at": expires_at,
+                    "trial_last_checked": time.time(),
+                    "device_nickname": nickname
+                }
+                save_config(config)
+
+                print("\033[K")
+                if minutes:
+                    print(f"✅ Trial started! You have {minutes} minutes to try {product_name}.")  # Testing mode
+                else:
+                    print(f"✅ Trial started! You have {days} days to try {product_name}.")
+                print("   Just a moment...")
+                return True
+
+        print(f"\033[K❌ Could not start trial: {trial_res.text}")
+        return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"\033[K❌ Connection error: {e}")
+        return False
+
+
+def check_trial_license(product: str) -> bool:
+    """
+    Check if the user has an active trial for this product.
+    Returns True if trial is active (user can proceed), False if expired or no trial.
+    """
+    config = load_config()
+    trial_key = f"{product}_trial"
+    trial_data = config.get(trial_key)
+
+    if not trial_data or not trial_data.get("is_trial"):
+        return False
+
+    email = trial_data.get("email")
+    expires_at_str = trial_data.get("trial_expires_at")
+    last_checked = trial_data.get("trial_last_checked", 0)
+    current_time = time.time()
+
+    if expires_at_str:
+        try:
+            expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+
+            if now >= expires_at:
+                print("")
+                if show_trial_expired_prompt(product, email):
+                    del config[trial_key]
+                    save_config(config)
+                    return False
+                sys.exit(0)
+
+            remaining = expires_at - now
+            hours_remaining = int(remaining.total_seconds() / 3600)
+            days_remaining = hours_remaining // 24
+
+            if (current_time - last_checked) >= TRIAL_CHECK_INTERVAL:
+                hw_id = get_hw_id()
+                server_status = check_trial_status_with_server(email, product, hw_id)
+
+                if server_status:
+                    trial_data["trial_last_checked"] = current_time
+
+                    if server_status.get("status") == "paid":
+                        print("🍋 Your license has been activated!")
+                        del config[trial_key]
+                        config[f"{product}_license"] = {
+                            "email": email,
+                            "last_verified": current_time,
+                            "device_nickname": trial_data.get("device_nickname", "Device")
+                        }
+                        save_config(config)
+                        return True
+
+                    if server_status.get("status") == "trial_expired":
+                        print("")
+                        if show_trial_expired_prompt(product, email):
+                            del config[trial_key]
+                            save_config(config)
+                            return False
+                        sys.exit(0)
+
+                    if server_status.get("status") == "trial_active":
+                        days_remaining = server_status.get("days_remaining", days_remaining)
+                        hours_remaining = server_status.get("hours_remaining", hours_remaining)
+
+                    save_config(config)
+
+            if days_remaining <= 1:
+                if hours_remaining > 0:
+                    print(f"⚠️  Trial expires in {hours_remaining} hours. Visit https://zestcli.com to purchase.")
+                else:
+                    mins_remaining = int(remaining.total_seconds() / 60)
+                    print(f"⚠️  Trial expires in {mins_remaining} minutes. Visit https://zestcli.com to purchase.")
+
+            return True
+
+        except (ValueError, TypeError):
+            pass
+
+    return False
+
+
 def authenticate(product: str):
     """The Gatekeeper: Checks local 14-day lease or starts OTP flow for a product."""
     hw_id = get_hw_id()
@@ -352,7 +615,7 @@ def authenticate(product: str):
             return True
 
         # Lease expired: Attempt silent background refresh via heartbeat
-        print("\033[K🌶  Refreshing license...", end="\r")
+        print("\033[K🌶 Refreshing license...", end="\r")
         try:
             res = requests.post(
                 f"{API_BASE}/license_heartbeat",
@@ -386,13 +649,31 @@ def authenticate(product: str):
 
     # 2. Welcome/OTP Flow (For new devices or expired/revoked licenses)
 
-    # Model exists but no license - just proceed to activation
-    # (No need to prompt user, they clearly want to activate)
+    # Present choice between trial and paid account
+    print("")
+    print("┌─────────────────────────────────────────────────┐")
+    print(f"│  Welcome to Zest {product_name}!")
+    print("│")
+    print("│  [1] I already have a paid account")
+    print("│  [2] Start free trial (5 days)")
+    print("└─────────────────────────────────────────────────┘")
+    print("")
 
-    print(f"🍋 Activation required for {product_name}.")
+    while True:
+        choice = input("Enter choice [1/2]: ").strip()
+        if choice == "2":
+            if start_trial_flow(product):
+                return True
+            print("\n🍋 Switching to paid account activation...")
+            choice = "1"
+        if choice == "1":
+            break
+        print("   Please enter 1 or 2.")
+
+    print(f"\n🍋 Activation required for {product_name}.")
     email = input("Enter your purchase email: ").strip()
 
-    print(f"🌶  Sending code to {email}...", end="\r")
+    print(f"🌶 Sending code to {email}...", end="\r")
     try:
         otp_res = requests.post(
             f"{API_BASE}/send_otp",
@@ -459,7 +740,7 @@ def authenticate(product: str):
                         choice_num = int(choice)
                         if 1 <= choice_num <= len(devices):
                             old_device = devices[choice_num - 1]
-                            print(f"\n🌶  Replacing \"{old_device['nickname']}\"...", end="\r")
+                            print(f"\n🌶 Replacing \"{old_device['nickname']}\"...", end="\r")
                             replace_res = requests.post(
                                 f"{API_BASE}/replace_device",
                                 json={
@@ -763,7 +1044,7 @@ def handle_logout(product: str | None, remote: bool = False):
         email = license_data.get("email")
         nickname = license_data.get("device_nickname", "this device")
         if email:
-            print(f"🌶  Deregistering \"{nickname}\" from {PRODUCTS[p]['name']}...", end="\r")
+            print(f"🌶 Deregistering \"{nickname}\" from {PRODUCTS[p]['name']}...", end="\r")
             try:
                 res = requests.post(
                     f"{API_BASE}/deregister_device",
@@ -818,7 +1099,7 @@ def handle_remote_logout(product: str | None):
     product_name = PRODUCTS[product]["name"]
 
     # Send OTP
-    print(f"\n🌶  Sending verification code to {email}...", end="\r")
+    print(f"\n🌶 Sending verification code to {email}...", end="\r")
     try:
         otp_res = requests.post(
             f"{API_BASE}/send_otp",
@@ -839,7 +1120,7 @@ def handle_remote_logout(product: str | None):
         return
 
     # Get device list
-    print(f"\n🌶  Fetching registered devices...", end="\r")
+    print(f"\n🌶 Fetching registered devices...", end="\r")
     try:
         list_res = requests.post(
             f"{API_BASE}/list_devices",
@@ -890,7 +1171,7 @@ def handle_remote_logout(product: str | None):
     selected_device = devices[choice_num - 1]
 
     # Deregister selected device
-    print(f"\n🌶  Deregistering \"{selected_device['nickname']}\"...", end="\r")
+    print(f"\n🌶 Deregistering \"{selected_device['nickname']}\"...", end="\r")
     try:
         dereg_res = requests.post(
             f"{API_BASE}/deregister_device",
@@ -1034,11 +1315,39 @@ def main():
             for p, info in PRODUCTS.items():
                 installed = "✅" if os.path.exists(info["path"]) else "❌"
                 license_key = f"{p}_license"
-                licensed = "✅" if config.get(license_key) else "❌"
+                trial_key = f"{p}_trial"
+                trial_data = config.get(trial_key)
+                license_data = config.get(license_key)
                 model_ver = get_model_version(p)
+
+                if license_data:
+                    license_status = "✅ Licensed"
+                elif trial_data and trial_data.get("is_trial"):
+                    expires_at_str = trial_data.get("trial_expires_at")
+                    try:
+                        expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+                        now = datetime.now(timezone.utc)
+                        remaining = expires_at - now
+                        days = int(remaining.total_seconds() / 86400)
+                        hours = int((remaining.total_seconds() % 86400) / 3600)
+                        if remaining.total_seconds() > 0:
+                            license_status = f"🕐 Trial ({days}d {hours}h left)"
+                        else:
+                            license_status = "❌ Trial Expired"
+                    except (ValueError, TypeError):
+                        license_status = "🕐 Trial"
+                else:
+                    license_status = "❌ Not licensed"
+
                 print(f"   {info['name']}:")
-                print(f"      Installed: {installed} | Licensed: {licensed} | Model v{model_ver}")
+                print(f"      Installed: {installed} | {license_status} | Model v{model_ver}")
+
+                if trial_data and trial_data.get("is_trial"):
+                    email = trial_data.get("email", "")
+                    print(f"      Email: {email}")
+
             print("")
+            print("   Purchase: https://zestcli.com")
             print("   Run 'zest --update' to check for updates.")
             sys.exit(0)
 
@@ -1131,7 +1440,9 @@ def main():
         print()
 
     # 4. Authenticate (active_product already determined in step 2.5)
-    authenticate(active_product)
+    # Check for active trial first - if trial is active, skip full authentication
+    if not check_trial_license(active_product):
+        authenticate(active_product)
 
     # 4.5. Check for updates (silent, non-blocking)
     check_for_updates(active_product)
@@ -1146,7 +1457,7 @@ def main():
     temp_increment = 0
 
     while True:
-        print(f"\033[K🌶  Thinking...", end="\r", flush=True)
+        print(f"\033[K🌶 Thinking...", end="\r", flush=True)
         command = generate_command(
             llm,
             query,

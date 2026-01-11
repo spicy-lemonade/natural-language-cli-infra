@@ -18,6 +18,7 @@ initialize_app()
 MAX_DEVICES_PER_PRODUCT = 2
 OTP_EXPIRY_MINUTES = 10
 VALID_PRODUCTS = ["fp16", "q5"]
+TRIAL_DURATION_MINUTES = 3  # TODO: Change back to TRIAL_DURATION_DAYS = 5 for production
 
 # Polar.sh product IDs (from sandbox dashboard)
 POLAR_PRODUCT_IDS = {
@@ -29,6 +30,50 @@ POLAR_PRODUCT_IDS = {
 def get_product_fields(product: str) -> tuple:
     """Return field names for a given product type."""
     return (f"{product}_is_paid", f"{product}_devices", f"{product}_polar_order_id")
+
+
+def get_trial_fields(product: str) -> tuple:
+    """Return trial-related field names for a given product type."""
+    return (
+        f"{product}_is_trial",
+        f"{product}_trial_started_at",
+        f"{product}_trial_expires_at"
+    )
+
+
+def get_trial_status(license_data: dict, product: str) -> dict:
+    """
+    Check trial status for a product. Returns a dict with:
+    - status: "paid", "trial_active", "trial_expired", or "no_license"
+    - Additional fields depending on status
+    """
+    paid_field, devices_field, _ = get_product_fields(product)
+    trial_field, _, expires_field = get_trial_fields(product)
+
+    if license_data.get(paid_field):
+        devices = license_data.get(devices_field, [])
+        return {"status": "paid", "devices_registered": len(devices)}
+
+    if license_data.get(trial_field):
+        expires_at = license_data.get(expires_field)
+        if expires_at:
+            now = datetime.now(timezone.utc)
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if now < expires_at:
+                remaining = expires_at - now
+                hours_remaining = int(remaining.total_seconds() / 3600)
+                days_remaining = hours_remaining // 24
+                return {
+                    "status": "trial_active",
+                    "days_remaining": days_remaining,
+                    "hours_remaining": hours_remaining,
+                    "trial_expires_at": expires_at.isoformat()
+                }
+            else:
+                return {"status": "trial_expired"}
+
+    return {"status": "no_license"}
 
 
 @https_fn.on_request(
@@ -278,7 +323,14 @@ def polar_webhook(req: https_fn.Request) -> https_fn.Response:
 def send_otp(req: https_fn.Request) -> https_fn.Response:
     """
     Generate a 6-digit OTP and send it to the user's email via Resend.
-    Expects JSON: {"email": "user@example.com", "product": "fp16" or "q5"}
+    Expects JSON: {
+        "email": "user@example.com",
+        "product": "fp16" or "q5",
+        "flow_type": "activation" or "trial" (optional, defaults to "activation")
+    }
+
+    For "activation" flow: requires existing paid license
+    For "trial" flow: creates license document if needed, allows new users
     """
     try:
         data = req.get_json()
@@ -287,6 +339,7 @@ def send_otp(req: https_fn.Request) -> https_fn.Response:
 
     email = data.get("email")
     product = data.get("product", "q5")
+    flow_type = data.get("flow_type", "activation")
 
     if not email:
         return https_fn.Response("Missing email", status=400)
@@ -294,52 +347,291 @@ def send_otp(req: https_fn.Request) -> https_fn.Response:
     if product not in VALID_PRODUCTS:
         return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
 
+    if flow_type not in ["activation", "trial"]:
+        return https_fn.Response("Invalid flow_type. Must be 'activation' or 'trial'", status=400)
+
     paid_field, _, _ = get_product_fields(product)
+    _, started_field, expires_field = get_trial_fields(product)
 
     db = firestore.client()
     doc_ref = db.collection("licenses").document(email)
     doc = doc_ref.get()
 
-    if not doc.exists:
-        return https_fn.Response("No license found for this email", status=404)
+    if flow_type == "activation":
+        if not doc.exists:
+            return https_fn.Response("No license found for this email", status=404)
+        license_data = doc.to_dict()
+        if not license_data.get(paid_field):
+            return https_fn.Response(f"No {product} license found for this email", status=403)
+    else:
+        if doc.exists:
+            license_data = doc.to_dict()
+            if license_data.get(paid_field):
+                return https_fn.Response(
+                    json.dumps({"status": "already_paid", "message": "You already have a paid license. Use activation flow."}),
+                    status=200,
+                    content_type="application/json"
+                )
+            if license_data.get(started_field):
+                expires_at = license_data.get(expires_field)
+                now = datetime.now(timezone.utc)
+                if isinstance(expires_at, str):
+                    expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if expires_at and now >= expires_at:
+                    return https_fn.Response(
+                        json.dumps({"status": "trial_expired", "message": "Your trial has expired. Please purchase to continue."}),
+                        status=200,
+                        content_type="application/json"
+                    )
+        else:
+            doc_ref.set({
+                "email": email,
+                "zest_user_id": str(uuid.uuid4()),
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
 
-    license_data = doc.to_dict()
-    if not license_data.get(paid_field):
-        return https_fn.Response(f"No {product} license found for this email", status=403)
-
-    # Generate 6-digit OTP
     otp_code = str(random.randint(100000, 999999))
     otp_expiry = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
-    
-    # Save OTP to Firestore
+
     doc_ref.update({
         "otp_code": otp_code,
         "otp_expiry": otp_expiry
     })
 
-    # Send email via Resend
     resend_api_key = os.environ.get("RESEND_API_KEY")
     if not resend_api_key:
         return https_fn.Response("Missing Resend API key", status=500)
 
     resend.api_key = resend_api_key
 
+    subject = "Your Zest CLI Verification Code"
+    if flow_type == "trial":
+        subject = "Start Your Zest CLI Free Trial"
+
     try:
         resend.Emails.send({
             "from": "info@zestcli.com",
             "to": email,
-            "subject": "Your Zest CLI Verification Code",
+            "subject": subject,
             "html": f"""
                 <h2>Your Zest CLI Verification Code</h2>
-                <p>Use this code to activate your device:</p>
+                <p>Use this code to {'start your free trial' if flow_type == 'trial' else 'activate your device'}:</p>
                 <h1 style="font-size: 32px; letter-spacing: 4px; font-family: monospace;">{otp_code}</h1>
                 <p>This code will expire in {OTP_EXPIRY_MINUTES} minutes.</p>
                 <p>If you did not request this code, please ignore this email.</p>
             """
         })
-        return https_fn.Response("OTP sent successfully", status=200)
+        return https_fn.Response(
+            json.dumps({"status": "otp_sent", "message": "OTP sent successfully"}),
+            status=200,
+            content_type="application/json"
+        )
     except Exception as e:
         return https_fn.Response(f"Failed to send email: {str(e)}", status=500)
+
+
+@https_fn.on_request(
+    region="europe-west1",
+    cors=options.CorsOptions(
+        cors_origins="*",
+        cors_methods=["POST"],
+    ),
+)
+def start_trial(req: https_fn.Request) -> https_fn.Response:
+    """
+    Start a 5-day trial after OTP verification.
+    Expects JSON: {
+        "email": "user@example.com",
+        "otp_code": "123456",
+        "product": "q5" or "fp16",
+        "device_id": "HARDWARE-UUID",
+        "device_name": "MacBook Pro"
+    }
+    """
+    try:
+        data = req.get_json()
+    except Exception:
+        return https_fn.Response("Invalid JSON", status=400)
+
+    email = data.get("email")
+    otp_code = data.get("otp_code")
+    product = data.get("product", "q5")
+    device_id = data.get("device_id")
+    device_name = data.get("device_name")
+
+    if not all([email, otp_code, device_id, device_name]):
+        return https_fn.Response("Missing required fields", status=400)
+
+    if product not in VALID_PRODUCTS:
+        return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
+
+    paid_field, _, _ = get_product_fields(product)
+    trial_field, started_field, expires_field = get_trial_fields(product)
+
+    db = firestore.client()
+    doc_ref = db.collection("licenses").document(email)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        return https_fn.Response("No license found. Please request OTP first.", status=404)
+
+    license_data = doc.to_dict()
+
+    stored_otp = license_data.get("otp_code")
+    otp_expiry = license_data.get("otp_expiry")
+
+    if not stored_otp or not otp_expiry:
+        return https_fn.Response("No OTP found. Please request a new one.", status=400)
+
+    if datetime.now(timezone.utc) > otp_expiry:
+        return https_fn.Response("OTP expired. Please request a new one.", status=400)
+
+    if stored_otp != otp_code:
+        return https_fn.Response("Invalid OTP", status=403)
+
+    if license_data.get(paid_field):
+        doc_ref.update({
+            "otp_code": firestore.DELETE_FIELD,
+            "otp_expiry": firestore.DELETE_FIELD
+        })
+        return https_fn.Response(
+            json.dumps({"status": "already_paid", "message": "You already have a paid license."}),
+            status=200,
+            content_type="application/json"
+        )
+
+    if license_data.get(started_field):
+        expires_at = license_data.get(expires_field)
+        now = datetime.now(timezone.utc)
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+
+        doc_ref.update({
+            "otp_code": firestore.DELETE_FIELD,
+            "otp_expiry": firestore.DELETE_FIELD
+        })
+
+        if expires_at and now >= expires_at:
+            return https_fn.Response(
+                json.dumps({"status": "trial_expired", "message": "Your trial has expired."}),
+                status=200,
+                content_type="application/json"
+            )
+
+        remaining = expires_at - now
+        hours_remaining = int(remaining.total_seconds() / 3600)
+        days_remaining = hours_remaining // 24
+
+        trial_devices = license_data.get("trial_devices", [])
+        device_exists = any(d["device_id"] == device_id for d in trial_devices)
+        if not device_exists:
+            trial_devices.append({
+                "device_id": device_id,
+                "device_name": device_name,
+                "registered_at": now.isoformat()
+            })
+            doc_ref.update({"trial_devices": trial_devices})
+
+        return https_fn.Response(
+            json.dumps({
+                "status": "trial_active",
+                "trial_expires_at": expires_at.isoformat(),
+                "days_remaining": days_remaining,
+                "hours_remaining": hours_remaining
+            }),
+            status=200,
+            content_type="application/json"
+        )
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=TRIAL_DURATION_MINUTES)  # TODO: Change back to days for production
+
+    doc_ref.update({
+        trial_field: True,
+        started_field: now.isoformat(),
+        expires_field: expires_at.isoformat(),
+        "trial_devices": [{
+            "device_id": device_id,
+            "device_name": device_name,
+            "registered_at": now.isoformat()
+        }],
+        "otp_code": firestore.DELETE_FIELD,
+        "otp_expiry": firestore.DELETE_FIELD
+    })
+
+    return https_fn.Response(
+        json.dumps({
+            "status": "trial_started",
+            "trial_expires_at": expires_at.isoformat(),
+            "minutes_remaining": TRIAL_DURATION_MINUTES  # TODO: Change back to days_remaining for production
+        }),
+        status=200,
+        content_type="application/json"
+    )
+
+
+@https_fn.on_request(
+    region="europe-west1",
+    cors=options.CorsOptions(
+        cors_origins="*",
+        cors_methods=["POST"],
+    ),
+)
+def check_trial_status(req: https_fn.Request) -> https_fn.Response:
+    """
+    Check trial/license status for a user and product.
+    Expects JSON: {
+        "email": "user@example.com",
+        "product": "q5" or "fp16",
+        "device_id": "HARDWARE-UUID"
+    }
+    """
+    try:
+        data = req.get_json()
+    except Exception:
+        return https_fn.Response("Invalid JSON", status=400)
+
+    email = data.get("email")
+    product = data.get("product", "q5")
+    device_id = data.get("device_id")
+
+    if not email:
+        return https_fn.Response("Missing email", status=400)
+
+    if product not in VALID_PRODUCTS:
+        return https_fn.Response(f"Invalid product. Must be one of: {VALID_PRODUCTS}", status=400)
+
+    db = firestore.client()
+    doc_ref = db.collection("licenses").document(email)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        return https_fn.Response(
+            json.dumps({"status": "no_license"}),
+            status=200,
+            content_type="application/json"
+        )
+
+    license_data = doc.to_dict()
+    trial_status = get_trial_status(license_data, product)
+
+    if device_id and trial_status["status"] == "trial_active":
+        trial_devices = license_data.get("trial_devices", [])
+        device_exists = any(d["device_id"] == device_id for d in trial_devices)
+        if not device_exists:
+            now = datetime.now(timezone.utc)
+            trial_devices.append({
+                "device_id": device_id,
+                "device_name": data.get("device_name", "Unknown Device"),
+                "registered_at": now.isoformat()
+            })
+            doc_ref.update({"trial_devices": trial_devices})
+
+    return https_fn.Response(
+        json.dumps(trial_status),
+        status=200,
+        content_type="application/json"
+    )
 
 
 @https_fn.on_request(
@@ -463,7 +755,14 @@ def verify_otp_and_register(req: https_fn.Request) -> https_fn.Response:
 def validate_device(req: https_fn.Request) -> https_fn.Response:
     """
     Validate that a device is registered and licensed for a specific product.
+    Supports both paid licenses and active trials.
     Expects JSON: {"email": "...", "device_uuid": "uuid", "product": "fp16" or "q5"}
+
+    Returns JSON with status:
+    - "valid": Paid license, device registered
+    - "trial_active": Active trial with remaining time
+    - "trial_expired": Trial has expired
+    - "no_license": No license or trial found
     """
     try:
         data = req.get_json()
@@ -487,19 +786,50 @@ def validate_device(req: https_fn.Request) -> https_fn.Response:
     doc = doc_ref.get()
 
     if not doc.exists:
-        return https_fn.Response("No license found", status=404)
+        return https_fn.Response(
+            json.dumps({"status": "no_license"}),
+            status=200,
+            content_type="application/json"
+        )
 
     license_data = doc.to_dict()
+    trial_status = get_trial_status(license_data, product)
 
-    if not license_data.get(paid_field):
-        return https_fn.Response(f"No {product} license found", status=403)
+    if trial_status["status"] == "paid":
+        devices = license_data.get(devices_field, [])
+        for device in devices:
+            if device["uuid"] == device_uuid:
+                return https_fn.Response(
+                    json.dumps({"status": "valid"}),
+                    status=200,
+                    content_type="application/json"
+                )
+        return https_fn.Response(
+            json.dumps({"status": "device_not_registered", "devices_registered": len(devices)}),
+            status=200,
+            content_type="application/json"
+        )
 
-    devices = license_data.get(devices_field, [])
-    for device in devices:
-        if device["uuid"] == device_uuid:
-            return https_fn.Response("Valid", status=200)
+    if trial_status["status"] == "trial_active":
+        trial_status["status"] = "trial_active"
+        return https_fn.Response(
+            json.dumps(trial_status),
+            status=200,
+            content_type="application/json"
+        )
 
-    return https_fn.Response(f"Device not registered for {product}", status=403)
+    if trial_status["status"] == "trial_expired":
+        return https_fn.Response(
+            json.dumps({"status": "trial_expired"}),
+            status=200,
+            content_type="application/json"
+        )
+
+    return https_fn.Response(
+        json.dumps({"status": "no_license"}),
+        status=200,
+        content_type="application/json"
+    )
 
 
 @https_fn.on_request(
@@ -753,6 +1083,73 @@ def license_heartbeat(req: https_fn.Request) -> https_fn.Response:
         "validated_at": now.isoformat(),
         "validated_at_unix": int(now.timestamp())
     }), status=200, content_type="application/json")
+
+
+@https_fn.on_request(
+    region="europe-west1",
+    secrets=["POLAR_ACCESS_TOKEN"],
+    cors=options.CorsOptions(
+        cors_origins="*",
+        cors_methods=["POST"],
+    ),
+)
+def get_checkout_url(req: https_fn.Request) -> https_fn.Response:
+    """
+    Generate a Polar checkout URL for trial-to-paid conversion.
+    Pre-fills the user's email for seamless checkout.
+    Expects JSON: {"email": "user@example.com", "product": "q5" or "fp16"}
+    """
+    try:
+        data = req.get_json()
+    except Exception:
+        return https_fn.Response("Invalid JSON", status=400)
+
+    email = data.get("email")
+    product = data.get("product", "q5")
+
+    if not email:
+        return https_fn.Response("Missing email", status=400)
+
+    if product not in POLAR_PRODUCT_IDS:
+        return https_fn.Response(
+            f"Invalid product. Available: {list(POLAR_PRODUCT_IDS.keys())}",
+            status=400
+        )
+
+    polar_access_token = os.environ.get("POLAR_ACCESS_TOKEN")
+    polar_success_url = os.environ.get("POLAR_SUCCESS_URL")
+
+    if not polar_access_token:
+        return https_fn.Response("Missing Polar access token configuration", status=500)
+
+    product_id = POLAR_PRODUCT_IDS[product]
+    success_url = polar_success_url or "https://zestcli.com?checkout=success"
+
+    try:
+        with Polar(
+            access_token=polar_access_token,
+            server="sandbox",
+        ) as polar:
+            checkout_params = {
+                "products": [product_id],
+                "success_url": success_url,
+                "customer_email": email,
+                "metadata": {"source": "trial_conversion", "product": product}
+            }
+
+            result = polar.checkouts.create(request=checkout_params)
+
+            return https_fn.Response(
+                json.dumps({"checkout_url": result.url}),
+                status=200,
+                content_type="application/json"
+            )
+    except Exception as e:
+        return https_fn.Response(
+            json.dumps({"error": f"Failed to create checkout: {str(e)}"}),
+            status=500,
+            content_type="application/json"
+        )
 
 
 # Model file configuration
