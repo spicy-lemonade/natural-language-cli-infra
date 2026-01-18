@@ -16,7 +16,7 @@ initialize_app()
 MAX_DEVICES_PER_PRODUCT = 2
 OTP_EXPIRY_MINUTES = 10
 VALID_PRODUCTS = ["fp16", "q5"]
-TRIAL_DURATION_MINUTES = 3  # TODO: Change to 7200 (5 days) for production
+TRIAL_DURATION_DAYS = 5
 
 # Polar.sh product IDs (from sandbox dashboard)
 POLAR_PRODUCT_IDS = {
@@ -708,7 +708,7 @@ def start_trial(req: https_fn.Request) -> https_fn.Response:
         )
 
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=TRIAL_DURATION_MINUTES)  # TODO: Change back to days for production
+    expires_at = now + timedelta(days=TRIAL_DURATION_DAYS)
 
     doc_ref.update({
         trial_field: True,
@@ -730,7 +730,7 @@ def start_trial(req: https_fn.Request) -> https_fn.Response:
         json.dumps({
             "status": "trial_started",
             "trial_expires_at": expires_at.isoformat(),
-            "minutes_remaining": TRIAL_DURATION_MINUTES  # TODO: Change back to days_remaining for production
+            "days_remaining": TRIAL_DURATION_DAYS
         }),
         status=200,
         content_type="application/json"
@@ -782,21 +782,32 @@ def check_trial_status(req: https_fn.Request) -> https_fn.Response:
     license_data = doc.to_dict()
     trial_status = get_trial_status(license_data, product)
 
-    # If device_id provided, check for device nickname in trial_devices
+    # If device_id provided, check for device nickname
     if device_id:
-        trial_devices = license_data.get("trial_devices", [])
-        existing_device = next((d for d in trial_devices if d["device_id"] == device_id), None)
-        if existing_device:
-            trial_status["device_nickname"] = existing_device.get("device_name", "")
+        # Check persistent device_nicknames mapping first (survives deregistration)
+        device_nicknames = license_data.get("device_nicknames", {})
+        if device_id in device_nicknames:
+            trial_status["device_nickname"] = device_nicknames[device_id]
 
-        if trial_status["status"] == "trial_active" and not existing_device:
-            now = datetime.now(timezone.utc)
-            trial_devices.append({
-                "device_id": device_id,
-                "device_name": data.get("device_name", "Unknown Device"),
-                "registered_at": now.isoformat()
-            })
-            doc_ref.update({"trial_devices": trial_devices})
+        # Fall back to checking trial_devices array
+        if not trial_status.get("device_nickname"):
+            trial_devices = license_data.get("trial_devices", [])
+            existing_device = next((d for d in trial_devices if d["device_id"] == device_id), None)
+            if existing_device:
+                trial_status["device_nickname"] = existing_device.get("device_name", "")
+
+        # Auto-register device for active trials
+        if trial_status["status"] == "trial_active":
+            trial_devices = license_data.get("trial_devices", [])
+            existing_device = next((d for d in trial_devices if d["device_id"] == device_id), None)
+            if not existing_device:
+                now = datetime.now(timezone.utc)
+                trial_devices.append({
+                    "device_id": device_id,
+                    "device_name": data.get("device_name", "Unknown Device"),
+                    "registered_at": now.isoformat()
+                })
+                doc_ref.update({"trial_devices": trial_devices})
 
     return https_fn.Response(
         json.dumps(trial_status),
@@ -874,6 +885,7 @@ def verify_otp_and_register(req: https_fn.Request) -> https_fn.Response:
                 devices[i]["nickname"] = device_nickname
                 doc_ref.update({
                     devices_field: devices,
+                    f"device_nicknames.{device_uuid}": device_nickname,
                     "otp_code": firestore.DELETE_FIELD,
                     "otp_expiry": firestore.DELETE_FIELD
                 })
@@ -906,9 +918,10 @@ def verify_otp_and_register(req: https_fn.Request) -> https_fn.Response:
         "last_validated_unix": int(now.timestamp())
     })
 
-    # Clear OTP and update devices
+    # Clear OTP, update devices, and persist nickname
     doc_ref.update({
         devices_field: devices,
+        f"device_nicknames.{device_uuid}": device_nickname,
         "otp_code": firestore.DELETE_FIELD,
         "otp_expiry": firestore.DELETE_FIELD
     })
@@ -1057,7 +1070,10 @@ def replace_device(req: https_fn.Request) -> https_fn.Response:
         "last_validated_unix": int(now.timestamp())
     })
 
-    doc_ref.update({devices_field: devices})
+    doc_ref.update({
+        devices_field: devices,
+        f"device_nicknames.{new_device_uuid}": new_device_nickname
+    })
     return https_fn.Response(f"Device replaced for {product}", status=200)
 
 

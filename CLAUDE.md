@@ -11,6 +11,8 @@ This file provides guidance to Claude Code when working with code in this reposi
 - Do *not* use numerical prefixes when writing comments
 - Use double quotation marks instead of single quotation marks when possible
 - Favor modular, reusable code
+- Keep Files Small. A single source file should generally not exceed a few hundred lines. If a file grows beyond this size, it is a strong signal to split it along clear conceptual or responsibility boundaries into multiple files.
+
 
 ## Project Overview
 
@@ -47,8 +49,6 @@ Avoid hasty abstractions. Duplication is often better than the wrong abstraction
 - **Verify True Duplication** - Before refactoring, confirm the duplicated code represents the same core logic. If the code blocks look similar by coincidence but handle different business rules that might change independently, they must remain separate.
 
 ### Package and Interface Philosophy
-
-Follow Go's idiomatic approach to packages and interfaces.
 
 - **Packages Have a Singular Purpose** - A package should represent a single concept (e.g., `storage`, `auth`, `models`). Do not create generic "utility," "common," or "helpers" packages.
 - **Interfaces are Defined by the Consumer** - Do not define large, monolithic interfaces on the producer side. Instead, the function that uses a dependency should define a small interface describing only the behavior it requires.

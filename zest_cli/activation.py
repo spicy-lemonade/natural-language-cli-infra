@@ -32,18 +32,42 @@ def activate_paid_license(product: str, email: str) -> bool:
     product_name = PRODUCTS[product]["name"]
     trial_key = f"{product}_trial"
 
-    # Send OTP
-    print(f"🌶\033[0m Sending code to {email}...", end="\r")
+    # First check if license exists
+    print(f"🌶\033[0m Checking license for {email}...", end="\r")
+    try:
+        check_res = requests.post(
+            f"{API_BASE}/check_trial_status",
+            json={"email": email, "product": product, "device_id": hw_id},
+            timeout=10
+        )
+        if check_res.status_code == 200:
+            data = check_res.json()
+            if data.get("status") != "paid":
+                print("\033[K")
+                print(f"❌ No {product_name} license found for {email}.")
+                print("   Visit https://zestcli.com to purchase a license.")
+                return False
+        else:
+            print("\033[K")
+            print(f"❌ No license found for {email}.")
+            print("   Visit https://zestcli.com to purchase a license.")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"\033[K❌ Connection error: {e}")
+        return False
+
+    # License exists, send OTP
+    print(f"\033[K🌶\033[0m Sending code to {email}...", end="\r")
     try:
         otp_res = requests.post(
             f"{API_BASE}/send_otp",
             json={"email": email, "product": product}
         )
         if otp_res.status_code != 200:
-            print(f"\n❌ Error: {otp_res.text}")
+            print(f"\033[K❌ Error: {otp_res.text}")
             return False
     except Exception as e:
-        print(f"\n❌ Connection error: {e}")
+        print(f"\033[K❌ Connection error: {e}")
         return False
 
     print("\033[K📧 Code sent!")

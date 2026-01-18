@@ -99,12 +99,28 @@ def check_pending_checkout_and_activate(product: str) -> bool | None:
                         sys.exit(0)
                     else:
                         print("   Please enter 1, 2, or 3.")
-    except requests.exceptions.RequestException:
-        print("\033[K⚠️  Could not check payment status. Proceeding to activation.")
-
-    del config["pending_checkout"]
-    save_config(config)
-    return False
+    except requests.exceptions.RequestException as e:
+        print("\033[K")
+        print(f"⚠️  Could not check payment status: {e}")
+        print("   This may be a temporary network issue.")
+        print("")
+        print("   [1] Retry")
+        print("   [2] Activate my license (requires email verification)")
+        print("   [3] Exit (will retry automatically next time)")
+        print("")
+        while True:
+            choice = input("Enter choice [1/2/3]: ").strip()
+            if choice == "1":
+                return check_pending_checkout_and_activate(product)
+            elif choice == "2":
+                del config["pending_checkout"]
+                save_config(config)
+                return False
+            elif choice == "3":
+                print("👋 Goodbye! Run zest again to retry.")
+                sys.exit(0)
+            else:
+                print("   Please enter 1, 2, or 3.")
 
 
 def show_trial_expired_prompt(product: str, email: str) -> bool:
@@ -418,19 +434,109 @@ def check_trial_license(product: str) -> bool:
             if result is not None:
                 return result
 
-        # Show warning if trial expiring soon
-        if days_remaining <= 1:
+        # Show daily reminder at 4, 3, 2, 1 days remaining (once per threshold)
+        if 1 <= days_remaining <= 4:
+            last_reminder_day = trial_data.get("last_reminder_day", -1)
+            if last_reminder_day != days_remaining:
+                result = _show_trial_reminder(product, email, days_remaining, config, trial_key, trial_data)
+                if result is not None:
+                    return result
+
+        # Show warning if less than 1 day remaining (no prompt, just warning)
+        elif days_remaining < 1:
             if hours_remaining > 0:
-                print(f"⚠️  Trial expires in {hours_remaining} hours. Visit https://zestcli.com to purchase.")
+                print(f"⚠️  Trial expires in {hours_remaining} hours. Visit https://zestcli.com to purchase a license.")
             else:
                 mins_remaining = int(remaining.total_seconds() / 60)
-                print(f"⚠️  Trial expires in {mins_remaining} minutes. Visit https://zestcli.com to purchase.")
+                print(f"⚠️  Trial expires in {mins_remaining} minutes. Visit https://zestcli.com to purchase a license.")
 
         return True
 
     except (ValueError, TypeError):
         pass
 
+    return False
+
+
+def _show_trial_reminder(product: str, email: str, days_remaining: int,
+                         config: dict, trial_key: str, trial_data: dict) -> bool | None:
+    """
+    Show daily trial reminder and offer checkout.
+    Returns True if user purchased, None to continue with normal flow.
+    """
+    product_name = PRODUCTS[product]["name"]
+    day_word = "day" if days_remaining == 1 else "days"
+
+    print("")
+    print(f"⏰ Your {product_name} trial expires in {days_remaining} {day_word}.")
+    print("")
+    print("   [1] Purchase a license now")
+    print("   [2] Continue with trial")
+    print("")
+
+    while True:
+        choice = input("Enter choice [1/2]: ").strip()
+        if choice == "1":
+            # Save reminder shown before starting checkout
+            trial_data["last_reminder_day"] = days_remaining
+            config[trial_key] = trial_data
+            save_config(config)
+
+            # Start checkout flow
+            if _start_reminder_checkout(product, email):
+                return True
+            return None
+        elif choice == "2":
+            # Save that we showed the reminder for this day threshold
+            trial_data["last_reminder_day"] = days_remaining
+            config[trial_key] = trial_data
+            save_config(config)
+            print("")
+            return None
+        else:
+            print("   Please enter 1 or 2.")
+
+
+def _start_reminder_checkout(product: str, email: str) -> bool:
+    """Start checkout flow from trial reminder."""
+    from activation import activate_paid_license
+
+    print("")
+    print(f"🍋 Opening checkout for {email}...")
+
+    hw_id = get_hw_id()
+    try:
+        res = requests.post(
+            f"{API_BASE}/get_checkout_url",
+            json={"email": email, "product": product, "device_id": hw_id},
+            timeout=10
+        )
+        if res.status_code == 200:
+            data = res.json()
+            checkout_url = data.get("checkout_url")
+            if checkout_url:
+                print(f"\n🍋 Opening checkout in your browser...")
+                print(f"   {checkout_url}")
+                import subprocess
+                subprocess.run(["open", checkout_url], check=False)
+
+                # Save pending checkout
+                config = load_config()
+                config["pending_checkout"] = {
+                    "email": email,
+                    "product": product,
+                    "timestamp": time.time()
+                }
+                save_config(config)
+
+                print("")
+                print("   After payment, run a zest query to activate.")
+                print("   For example: zest list all files in Downloads")
+                return False
+    except requests.exceptions.RequestException:
+        pass
+
+    print("❌ Could not open checkout. Visit https://zestcli.com to purchase a license.")
     return False
 
 
