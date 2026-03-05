@@ -20,6 +20,8 @@ Zest CLI translates natural language into shell commands using local small langu
 
 While the core agent runs **offline on CPU** (privacy-first, no tracking), the training pipeline utilizes Google Cloud Storage (GCS) to manage datasets before they are loaded into Google Colab for fine-tuning.
 
+The training data and data processing pipeline are **proprietary and maintained in a separate private repository**. Both the data sources and the processing logic are confidential.
+
 We utilize a **Medallion Architecture** pattern for data storage to ensure reproducibility and data quality:
 
 | Layer | Bucket Role |
