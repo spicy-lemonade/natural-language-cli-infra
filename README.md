@@ -1,16 +1,16 @@
-# Zest CLI - Infra
+# 🌶️ Zest CLI from Spicy Lemonade 🍋
 
-#### Using locally-trained small language models. No cloud. No API keys. Runs offline. Runs on CPU. Privacy first. No tracking. No logging. No analytics.
+#### Small language models. Runs offline. Runs on CPU. No cloud. No API keys. Privacy first. No tracking. No logging. No analytics.
 ![spicy](https://github.com/user-attachments/assets/9c3d925d-5c7b-44ed-a2c8-b73e5a897895)
 
-Zest CLI translates natural language into shell commands using locally-trained small language models. macOS only. Learn more at [zestcli.com](https://zestcli.com).
+Zest CLI translates natural language into shell commands using local small language models. macOS only. Learn more at [zestcli.com](https://zestcli.com).
 
 ### Why Zest CLI?
 
 - **Fully offline** — runs entirely on your machine with no network calls at inference time
+- **Runs on CPU** — no GPU needed, works on any modern Mac
 - **Privacy first** — your commands and queries never leave your device
 - **No API keys** — no accounts, tokens, or cloud dependencies required
-- **Runs on CPU** — no GPU needed, works on any modern Mac
 
 ## 🏗 Architecture & Data Flow
 
