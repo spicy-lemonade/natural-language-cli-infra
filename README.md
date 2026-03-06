@@ -54,7 +54,7 @@ All buckets have versioning enabled. See [docs/model_releases.md](docs/model_rel
   * **DNS & Domain Management:** Domain `zestcli.com`, and DNS.
   * **Security & Performance:**  Website passed through cloudflare proxy
 * **GitHub Pages:**
-  * Free tier hosting on GitHub Pages. This needs the frontend repo to be public.
+  * Free tier hosting on GitHub Pages.
 * **Zoho Mail:**
   * **Email Hosting:** Custom-domain email for internal and operational communication.
 * **Resend:**
